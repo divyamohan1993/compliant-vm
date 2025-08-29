@@ -305,6 +305,15 @@ if ! id -u sync >/dev/null 2>&1; then
   sudo useradd -m -g sync -s /usr/sbin/nologin sync
 fi
 
+# Ensure canonical home for sync (fix prior bad state like /bin)
+HOME_DIR="$(getent passwd sync | cut -d: -f6 || true)"
+if [[ "$HOME_DIR" != "/home/sync" ]]; then
+  sudo usermod -d /home/sync -m sync
+fi
+
+# Ensure .ssh exists with correct ownership
+sudo install -d -m 700 -o sync -g sync /home/sync/.ssh
+
 sudo mkdir -p /data
 sudo chown -R sync:sync /data
 
@@ -333,20 +342,20 @@ section "6) SSH trust for sync user with host key pinning"
 
 # Generate key on VM1 if missing
 gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command \
-  "sudo -u sync bash -lc 'test -f ~/.ssh/id_ed25519 || (mkdir -p ~/.ssh && chmod 700 ~/.ssh && ssh-keygen -t ed25519 -N \"\" -f ~/.ssh/id_ed25519)'"
-
-PUBKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command "sudo -u sync cat ~/.ssh/id_ed25519.pub")"
+  "sudo -u sync bash -lc 'H=/home/sync; test -f \$H/.ssh/id_ed25519 || (install -d -m 700 -o sync -g sync \$H/.ssh && ssh-keygen -t ed25519 -N \"\" -f \$H/.ssh/id_ed25519)'"
+ 
+PUBKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command "sudo -u sync bash -lc 'cat /home/sync/.ssh/id_ed25519.pub'")"
 
 # Create known_hosts on VM1 for IP2 (host key pin)
 HOSTKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command "ssh-keyscan -t ed25519 $IP2" 2>/dev/null || true)"
 if [[ -n "$HOSTKEY" ]]; then
   gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command \
-    "sudo -u sync bash -lc 'mkdir -p ~/.ssh; grep -q \"${IP2}\" ~/.ssh/known_hosts 2>/dev/null || echo \"$HOSTKEY\" >> ~/.ssh/known_hosts; chmod 600 ~/.ssh/known_hosts'"
+    "sudo -u sync bash -lc 'H=/home/sync; install -d -m 700 -o sync -g sync \$H/.ssh; grep -q \"${IP2}\" \$H/.ssh/known_hosts 2>/dev/null || echo \"$HOSTKEY\" >> \$H/.ssh/known_hosts; chmod 600 \$H/.ssh/known_hosts'"
 fi
 
 # Push authorized key to VM2 for sync user (restrict source by IP1)
 gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command \
-  "sudo -u sync bash -lc 'mkdir -p ~/.ssh && chmod 700 ~/.ssh; grep -q \"${PUBKEY}\" ~/.ssh/authorized_keys 2>/dev/null || echo \"from=${IP1} ${PUBKEY}\" >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys'"
+  "sudo -u sync bash -lc 'H=/home/sync; install -d -m 700 -o sync -g sync \$H/.ssh; grep -q \"${PUBKEY}\" \$H/.ssh/authorized_keys 2>/dev/null || echo \"from=${IP1} ${PUBKEY}\" >> \$H/.ssh/authorized_keys; chmod 600 \$H/.ssh/authorized_keys'"
 
 # ---- 7) Continuous rsync service (idempotent) ---------------------------------
 section "7) Continuous encrypted sync service (VM1 -> VM2)"
