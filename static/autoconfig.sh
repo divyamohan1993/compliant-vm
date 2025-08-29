@@ -155,6 +155,7 @@ ACCOUNT="$(gcloud config get-value account)"
 # Make sure your user can use OS Login and IAP TCP forwarding
 iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.osAdminLogin"
 iam_bind_if_missing "user:${ACCOUNT}" "roles/iap.tunnelResourceAccessor"
+iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.viewer"
 
 # Ensure the local key exists for gcloud; OS Login will use it
 if [[ ! -f "$HOME/.ssh/google_compute_engine.pub" ]]; then
@@ -170,6 +171,23 @@ gcloud compute os-login ssh-keys add \
 # tiny pause for propagation
 sleep 5
 
+# ---- 1d) Pin a dedicated OS Login SSH key and force gcloud to use it ----
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/gce_oslogin}"
+if [[ ! -f "$SSH_KEY.pub" ]]; then
+  ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "$ACCOUNT"
+fi
+
+# Register (or refresh) the pubkey in OS Login (24h TTL to survive long runs)
+gcloud compute os-login ssh-keys add \
+  --key-file="$SSH_KEY.pub" \
+  --ttl=24h \
+  --project "$PROJECT_ID" || true
+
+# tiny propagation pause
+sleep 5
+
+# Common SSH flags for every gcloud compute ssh call
+SSH_COMMON=(--tunnel-through-iap --ssh-key-file="$SSH_KEY")
 
 # ---- 2) KMS (CMEK) -------------------------------------------------------------
 section "2) KMS (CMEK) with rotation schedule"
@@ -364,27 +382,27 @@ sudo systemctl restart google-cloud-ops-agent
 EOF
 
 
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command "$REMOTE_BOOTSTRAP"
-gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command "$REMOTE_BOOTSTRAP"
+gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE_BOOTSTRAP"
+gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE_BOOTSTRAP"
 
 # ---- 6) SSH trust (keypair + host key pinning) --------------------------------
 section "6) SSH trust for sync user with host key pinning"
 
 # Generate key on VM1 if missing
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command \
+gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
   "sudo -u sync bash -lc 'H=/home/sync; test -f \$H/.ssh/id_ed25519 || (install -d -m 700 -o sync -g sync \$H/.ssh && ssh-keygen -t ed25519 -N \"\" -f \$H/.ssh/id_ed25519)'"
  
-PUBKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command "sudo -u sync bash -lc 'cat /home/sync/.ssh/id_ed25519.pub'")"
+PUBKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "sudo -u sync bash -lc 'cat /home/sync/.ssh/id_ed25519.pub'")"
 
 # Create known_hosts on VM1 for IP2 (host key pin)
-HOSTKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command "ssh-keyscan -t ed25519 $IP2" 2>/dev/null || true)"
+HOSTKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "ssh-keyscan -t ed25519 $IP2" 2>/dev/null || true)"
 if [[ -n "$HOSTKEY" ]]; then
-  gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command \
+  gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
     "sudo -u sync bash -lc 'H=/home/sync; install -d -m 700 -o sync -g sync \$H/.ssh; grep -q \"${IP2}\" \$H/.ssh/known_hosts 2>/dev/null || echo \"$HOSTKEY\" >> \$H/.ssh/known_hosts; chmod 600 \$H/.ssh/known_hosts'"
 fi
 
 # Push authorized key to VM2 for sync user (restrict source by IP1)
-gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command \
+gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
   "sudo -u sync bash -lc 'H=/home/sync; install -d -m 700 -o sync -g sync \$H/.ssh; grep -q \"${PUBKEY}\" \$H/.ssh/authorized_keys 2>/dev/null || echo \"from=${IP1} ${PUBKEY}\" >> \$H/.ssh/authorized_keys; chmod 600 \$H/.ssh/authorized_keys'"
 
 # ---- 7) Continuous rsync service (idempotent) ---------------------------------
@@ -396,7 +414,7 @@ DEST_USER="sync"
 DEST_HOST="${IP2}"
 SRC_DIR="/data/"
 DEST_DIR="/data/"
-SSH_OPTS="-o StrictHostKeyChecking=yes"
+SSH_OPTS="-o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -i /home/sync/.ssh/id_ed25519"
 rsync -az --delete -e "ssh \$SSH_OPTS" "\$SRC_DIR" "\${DEST_USER}@\${DEST_HOST}:\${DEST_DIR}"
 inotifywait -m -r -e modify,create,delete,move "\$SRC_DIR" | while read -r _; do
   rsync -az --delete -e "ssh \$SSH_OPTS" "\$SRC_DIR" "\${DEST_USER}@\${DEST_HOST}:\${DEST_DIR}"
@@ -429,11 +447,11 @@ WantedBy=multi-user.target
 EOF
 
 # Install/update script + service atomically
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command \
+gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
   "echo '${SYNC_SCRIPT}' | sudo tee /usr/local/bin/continuous-sync.sh >/dev/null && sudo chmod 755 /usr/local/bin/continuous-sync.sh"
 
 # Only (re)write unit if missing or content differs
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command \
+gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
   "sudo bash -lc 'UNIT=/etc/systemd/system/continuous-sync.service; TMP=\$(mktemp); echo \"${SYNC_SERVICE}\" > \$TMP; if ! cmp -s \$TMP \$UNIT; then sudo cp \$TMP \$UNIT; fi; sudo systemctl daemon-reload; sudo systemctl enable --now continuous-sync; systemctl is-active continuous-sync; sudo journalctl -u continuous-sync -n 20 --no-pager'"
 
 # ---- 8) Summary / Verification hints ------------------------------------------
