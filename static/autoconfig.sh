@@ -305,10 +305,18 @@ if ! id -u sync >/dev/null 2>&1; then
   sudo useradd -m -g sync -s /usr/sbin/nologin sync
 fi
 
-# Ensure canonical home for sync (fix prior bad state like /bin)
+## Ensure canonical home for sync (fix prior bad states like /bin)
 HOME_DIR="$(getent passwd sync | cut -d: -f6 || true)"
 if [[ "$HOME_DIR" != "/home/sync" ]]; then
-  sudo usermod -d /home/sync -m sync
+  if [[ "$HOME_DIR" == /home/* ]]; then
+    # Safe to move if old home was under /home
+    sudo usermod -d /home/sync -m sync
+  else
+    # Don't try to move system dirs like /bin; just set + prepare the new home
+    sudo mkdir -p /home/sync
+    sudo chown sync:sync /home/sync
+    sudo usermod -d /home/sync sync
+  fi
 fi
 
 # Ensure .ssh exists with correct ownership
