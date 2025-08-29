@@ -241,7 +241,7 @@ log "$VM2 @ $IP2"
 
 # ---- 5) Bootstrap packages / audit on both VMs --------------------------------
 section "5) Bootstrap auditd + Ops Agent + rsync + inotify"
-read -r -d '' REMOTE_BOOTSTRAP <<'EOF'
+read -r -d '' REMOTE_BOOTSTRAP <<'EOF' || true
 set -Eeuo pipefail
 
 # Make apt resilient + IPv4-only (avoids IPv6 reachability issues)
