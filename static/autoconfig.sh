@@ -244,6 +244,9 @@ section "5) Bootstrap auditd + Ops Agent + rsync + inotify"
 read -r -d '' REMOTE_BOOTSTRAP <<'EOF' || true
 set -Eeuo pipefail
 
+# Non-interactive apt to avoid debconf prompts
+export DEBIAN_FRONTEND=noninteractive
+
 # Make apt resilient + IPv4-only (avoids IPv6 reachability issues)
 sudo mkdir -p /etc/apt/apt.conf.d
 echo 'Acquire::ForceIPv4 "true"; Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
@@ -265,9 +268,15 @@ for i in {1..5}; do
 done
 
 # Install packages (retry once more on failure)
-if ! sudo apt-get install -y google-cloud-ops-agent auditd inotify-tools rsync; then
+if ! sudo apt-get install -y \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      google-cloud-ops-agent auditd inotify-tools rsync; then
   sudo apt-get update -y
-  sudo apt-get install -y google-cloud-ops-agent auditd inotify-tools rsync
+  sudo apt-get install -y \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      google-cloud-ops-agent auditd inotify-tools rsync
 fi
 
 sudo systemctl enable --now auditd
@@ -276,8 +285,14 @@ sudo systemctl enable --now auditd
 echo '-w /data -p rwa -k data_changes' | sudo tee /etc/audit/rules.d/99-data.rules >/dev/null
 sudo augenrules --load
 
-# Dedicated sync user & /data
-id -u sync >/dev/null 2>&1 || sudo useradd -m -s /usr/sbin/nologin sync
+# Dedicated sync user & /data (ensure group exists, then user uses that group)
+if ! getent group sync >/dev/null 2>&1; then
+  sudo groupadd --system sync
+fi
+if ! id -u sync >/dev/null 2>&1; then
+  sudo useradd -m -g sync -s /usr/sbin/nologin sync
+fi
+
 sudo mkdir -p /data
 sudo chown -R sync:sync /data
 
@@ -296,6 +311,7 @@ YAML
 
 sudo systemctl restart google-cloud-ops-agent
 EOF
+
 
 gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command "$REMOTE_BOOTSTRAP"
 gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --command "$REMOTE_BOOTSTRAP"
