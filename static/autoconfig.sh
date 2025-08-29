@@ -257,22 +257,34 @@ for i in {1..5}; do
   sleep 5
 done
 
-# Add Ops Agent repo (idempotent)
-curl -sS https://dl.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/google-cloud-ops-agent.gpg || true
+# Add Ops Agent repo (idempotent, correct key source) + resilient fallback
+sudo install -d -m 0755 /usr/share/keyrings
+# Correct URL and non-interactive dearmor
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+  | sudo gpg --dearmor --yes --batch -o /usr/share/keyrings/google-cloud-ops-agent.gpg || true
+
 echo "deb [signed-by=/usr/share/keyrings/google-cloud-ops-agent.gpg] https://packages.cloud.google.com/apt google-cloud-ops-agent-jammy-all main" \
   | sudo tee /etc/apt/sources.list.d/google-cloud-ops-agent.list >/dev/null
 
-for i in {1..5}; do
-  if sudo apt-get update -y; then break; fi
-  sleep 5
+# Update with retries; if signature error persists, fall back to vendor script
+sig_ok=0
+for i in {1..3}; do
+  if sudo apt-get update -y 2>&1 | tee /tmp/apt_update.log; then
+    if ! grep -q 'NO_PUBKEY' /tmp/apt_update.log; then
+      sig_ok=1; break
+    fi
+  fi
+  # fallback registers repo/key the "old" way (still supported by Google)
+  curl -sS https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh | sudo bash || true
+  sleep 3
 done
 
-# Install packages (retry once more on failure)
+# Install packages (retry-once pattern)
 if ! sudo apt-get install -y \
       -o Dpkg::Options::=--force-confdef \
       -o Dpkg::Options::=--force-confold \
       google-cloud-ops-agent auditd inotify-tools rsync; then
-  sudo apt-get update -y
+  sudo apt-get update -y || true
   sudo apt-get install -y \
       -o Dpkg::Options::=--force-confdef \
       -o Dpkg::Options::=--force-confold \
