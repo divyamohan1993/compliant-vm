@@ -140,12 +140,12 @@ if ! exists_nat; then
     --router "$ROUTER" --region "$REGION" --project "$PROJECT_ID" \
     --nat-all-subnet-ip-ranges \
     --auto-allocate-nat-external-ips \
-    --enable-logging --logging-filter=ALL
+    --enable-logging --log-filter=ALL
 else
   # ensure logging stays enabled for auditability
   gcloud compute routers nats update "$NAT" \
     --router "$ROUTER" --region "$REGION" --project "$PROJECT_ID" \
-    --enable-logging --logging-filter=ALL
+    --enable-logging --log-filter=ALL
   log "NAT $NAT exists - ensured logging"
 fi
 
