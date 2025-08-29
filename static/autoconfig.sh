@@ -149,27 +149,65 @@ else
   log "NAT $NAT exists - ensured logging"
 fi
 
-# ---- 1c) Ensure OS Login + IAP access for current user (prevents SSH 'Permission denied (publickey)') ----
+# # ---- 1c) Ensure OS Login + IAP access for current user (prevents SSH 'Permission denied (publickey)') ----
+# ACCOUNT="$(gcloud config get-value account)"
+
+# # Make sure your user can use OS Login and IAP TCP forwarding
+# iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.osAdminLogin"
+# iam_bind_if_missing "user:${ACCOUNT}" "roles/iap.tunnelResourceAccessor"
+# iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.viewer"
+
+# # Ensure the local key exists for gcloud; OS Login will use it
+# if [[ ! -f "$HOME/.ssh/google_compute_engine.pub" ]]; then
+#   ssh-keygen -t rsa -N "" -f "$HOME/.ssh/google_compute_engine" -C "$ACCOUNT"
+# fi
+
+# # (Re)register the key with OS Login; safe and idempotent
+# gcloud compute os-login ssh-keys add \
+#   --key-file="$HOME/.ssh/google_compute_engine.pub" \
+#   --ttl=1h \
+#   --project "$PROJECT_ID" || true
+
+# tiny pause for propagation
+
+
+# ---- 1c) Enforce OS Login on project + instances and pin a dedicated key ----
 ACCOUNT="$(gcloud config get-value account)"
 
-# Make sure your user can use OS Login and IAP TCP forwarding
+# Ensure roles for your user (idempotent)
 iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.osAdminLogin"
 iam_bind_if_missing "user:${ACCOUNT}" "roles/iap.tunnelResourceAccessor"
 iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.viewer"
 
-# Ensure the local key exists for gcloud; OS Login will use it
-if [[ ! -f "$HOME/.ssh/google_compute_engine.pub" ]]; then
-  ssh-keygen -t rsa -N "" -f "$HOME/.ssh/google_compute_engine" -C "$ACCOUNT"
+# Enforce OS Login everywhere (safe to re-run)
+gcloud compute project-info add-metadata --project "$PROJECT_ID" \
+  --metadata enable-oslogin=TRUE
+for inst in "$VM1" "$VM2"; do
+  gcloud compute instances add-metadata "$inst" --zone "$ZONE" --project "$PROJECT_ID" \
+    --metadata enable-oslogin=TRUE
+done
+
+# Create a dedicated OS Login key and register it with 24h TTL
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/gce_oslogin}"
+if [[ ! -f "$SSH_KEY.pub" ]]; then
+  ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "$ACCOUNT"
+fi
+gcloud compute os-login ssh-keys add --project "$PROJECT_ID" \
+  --key-file="$SSH_KEY.pub" --ttl=24h || true
+
+# Resolve the exact OS Login Linux username and force gcloud to use it
+OS_LOGIN_USER="$(gcloud compute os-login describe-profile --project "$PROJECT_ID" \
+  --format='value(posixAccounts[?primary=true].username)')"
+if [[ -z "$OS_LOGIN_USER" ]]; then
+  OS_LOGIN_USER="$(gcloud compute os-login describe-profile --project "$PROJECT_ID" \
+    --format='value(posixAccounts[0].username)')"
 fi
 
-# (Re)register the key with OS Login; safe and idempotent
-gcloud compute os-login ssh-keys add \
-  --key-file="$HOME/.ssh/google_compute_engine.pub" \
-  --ttl=1h \
-  --project "$PROJECT_ID" || true
+# Common SSH flags (IAP + correct key + correct user)
+SSH_COMMON=(--tunnel-through-iap --ssh-key-file="$SSH_KEY" --ssh-flag="-l ${OS_LOGIN_USER}")
 
-# tiny pause for propagation
 sleep 5
+
 
 # ---- 1d) Pin a dedicated OS Login SSH key and force gcloud to use it ----
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/gce_oslogin}"
