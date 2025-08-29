@@ -149,6 +149,28 @@ else
   log "NAT $NAT exists - ensured logging"
 fi
 
+# ---- 1c) Ensure OS Login + IAP access for current user (prevents SSH 'Permission denied (publickey)') ----
+ACCOUNT="$(gcloud config get-value account)"
+
+# Make sure your user can use OS Login and IAP TCP forwarding
+iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.osAdminLogin"
+iam_bind_if_missing "user:${ACCOUNT}" "roles/iap.tunnelResourceAccessor"
+
+# Ensure the local key exists for gcloud; OS Login will use it
+if [[ ! -f "$HOME/.ssh/google_compute_engine.pub" ]]; then
+  ssh-keygen -t rsa -N "" -f "$HOME/.ssh/google_compute_engine" -C "$ACCOUNT"
+fi
+
+# (Re)register the key with OS Login; safe and idempotent
+gcloud compute os-login ssh-keys add \
+  --key-file="$HOME/.ssh/google_compute_engine.pub" \
+  --ttl=1h \
+  --project "$PROJECT_ID" || true
+
+# tiny pause for propagation
+sleep 5
+
+
 # ---- 2) KMS (CMEK) -------------------------------------------------------------
 section "2) KMS (CMEK) with rotation schedule"
 if ! exists_keyring; then
