@@ -157,16 +157,32 @@ fi
 iam_bind_if_missing "serviceAccount:${SA_EMAIL}" "roles/logging.logWriter"
 iam_bind_if_missing "serviceAccount:${SA_EMAIL}" "roles/monitoring.metricWriter"
 
-# Allow SA to use the CMEK
+# Also allow the Compute Engine **Service Agent** to use the CMEK (required for boot-disk CMEK).
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+CE_AGENT="service-${PROJECT_NUMBER}@compute-system.iam.gserviceaccount.com"
+
 if ! gcloud kms keys get-iam-policy "$KEY" --keyring "$KEYRING" --location "$KEY_LOC" --project "$PROJECT_ID" \
-  --format=json | jq -e --arg m "serviceAccount:${SA_EMAIL}" '.bindings[]? | select(.role=="roles/cloudkms.cryptoKeyEncrypterDecrypter") | .members[]? | select(.==$m)' >/dev/null; then
+  --format=json | jq -e --arg m "serviceAccount:${CE_AGENT}" \
+  '.bindings[]? | select(.role=="roles/cloudkms.cryptoKeyEncrypterDecrypter") | .members[]? | select(.==$m)' >/dev/null; then
   gcloud kms keys add-iam-policy-binding "$KEY" \
     --location "$KEY_LOC" --keyring "$KEYRING" \
-    --member="serviceAccount:${SA_EMAIL}" \
-    --role="roles/cloudkms.cryptoKeyEncrypterDecrypter" --project "$PROJECT_ID"
+    --member="serviceAccount:${CE_AGENT}" \
+    --role="roles/cloudkms.cryptoKeyEncrypterDecrypter" \
+    --project "$PROJECT_ID"
 else
-  log "CMEK binding exists for $SA_EMAIL - skipping"
+  log "CMEK binding exists for Compute Engine service agent - skipping"
 fi
+
+# # Allow SA to use the CMEK
+# if ! gcloud kms keys get-iam-policy "$KEY" --keyring "$KEYRING" --location "$KEY_LOC" --project "$PROJECT_ID" \
+#   --format=json | jq -e --arg m "serviceAccount:${SA_EMAIL}" '.bindings[]? | select(.role=="roles/cloudkms.cryptoKeyEncrypterDecrypter") | .members[]? | select(.==$m)' >/dev/null; then
+#   gcloud kms keys add-iam-policy-binding "$KEY" \
+#     --location "$KEY_LOC" --keyring "$KEYRING" \
+#     --member="serviceAccount:${SA_EMAIL}" \
+#     --role="roles/cloudkms.cryptoKeyEncrypterDecrypter" --project "$PROJECT_ID"
+# else
+#   log "CMEK binding exists for $SA_EMAIL - skipping"
+# fi
 
 # ---- 4) Shielded VMs (no public IPs) ------------------------------------------
 section "4) Compute instances"
