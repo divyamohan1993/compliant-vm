@@ -58,6 +58,9 @@ exists_keyring()  { gcloud kms keyrings describe "$KEYRING" --location "$KEY_LOC
 exists_key()      { gcloud kms keys describe "$KEY" --keyring "$KEYRING" --location "$KEY_LOC" --project "$PROJECT_ID" >/dev/null 2>&1; }
 exists_sa()       { gcloud iam service-accounts describe "$SA_EMAIL" --project "$PROJECT_ID" >/dev/null 2>&1; }
 exists_vm()       { gcloud compute instances describe "$1" --zone "$ZONE" --project "$PROJECT_ID" >/dev/null 2>&1; }
+exists_router() { gcloud compute routers describe "$ROUTER" --region "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; }
+exists_nat()    { gcloud compute routers nats describe "$NAT" --router "$ROUTER" --region "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; }
+
 
 enable_api() {
   local svc="$1"
@@ -119,6 +122,31 @@ if ! exists_fw "allow-internal"; then
     --description="Allow internal traffic within subnet"
 else
   log "Firewall allow-internal exists - skipping"
+fi
+
+# ---- 1b) Cloud Router + Cloud NAT for egress (apt/security updates) ----
+ROUTER="${NETWORK}-router"
+NAT="${NETWORK}-nat"
+
+if ! exists_router; then
+  gcloud compute routers create "$ROUTER" \
+    --network "$NETWORK" --region "$REGION" --project "$PROJECT_ID"
+else
+  log "Router $ROUTER exists - skipping"
+fi
+
+if ! exists_nat; then
+  gcloud compute routers nats create "$NAT" \
+    --router "$ROUTER" --region "$REGION" --project "$PROJECT_ID" \
+    --nat-all-subnet-ip-ranges \
+    --auto-allocate-nat-external-ips \
+    --enable-logging --logging-filter=ALL
+else
+  # ensure logging stays enabled for auditability
+  gcloud compute routers nats update "$NAT" \
+    --router "$ROUTER" --region "$REGION" --project "$PROJECT_ID" \
+    --enable-logging --logging-filter=ALL
+  log "NAT $NAT exists - ensured logging"
 fi
 
 # ---- 2) KMS (CMEK) -------------------------------------------------------------
@@ -213,14 +241,38 @@ log "$VM2 @ $IP2"
 
 # ---- 5) Bootstrap packages / audit on both VMs --------------------------------
 section "5) Bootstrap auditd + Ops Agent + rsync + inotify"
-read -r -d '' REMOTE_BOOTSTRAP <<'EOF' || true
+read -r -d '' REMOTE_BOOTSTRAP <<'EOF'
 set -Eeuo pipefail
-sudo apt-get update -y
-curl -sS https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh | sudo bash
-sudo apt-get install -y google-cloud-ops-agent auditd rsync inotify-tools
+
+# Make apt resilient + IPv4-only (avoids IPv6 reachability issues)
+sudo mkdir -p /etc/apt/apt.conf.d
+echo 'Acquire::ForceIPv4 "true"; Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
+
+# Update with retries
+for i in {1..5}; do
+  if sudo apt-get update -y; then break; fi
+  sleep 5
+done
+
+# Add Ops Agent repo (idempotent)
+curl -sS https://dl.google.com/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/google-cloud-ops-agent.gpg || true
+echo "deb [signed-by=/usr/share/keyrings/google-cloud-ops-agent.gpg] https://packages.cloud.google.com/apt google-cloud-ops-agent-jammy-all main" \
+  | sudo tee /etc/apt/sources.list.d/google-cloud-ops-agent.list >/dev/null
+
+for i in {1..5}; do
+  if sudo apt-get update -y; then break; fi
+  sleep 5
+done
+
+# Install packages (retry once more on failure)
+if ! sudo apt-get install -y google-cloud-ops-agent auditd inotify-tools rsync; then
+  sudo apt-get update -y
+  sudo apt-get install -y google-cloud-ops-agent auditd inotify-tools rsync
+fi
+
 sudo systemctl enable --now auditd
 
-# Audit rules for /data (append-only)
+# Minimal audit rules for /data
 echo '-w /data -p rwa -k data_changes' | sudo tee /etc/audit/rules.d/99-data.rules >/dev/null
 sudo augenrules --load
 
@@ -241,6 +293,7 @@ logging:
       default_pipeline:
         receivers: [auditd]
 YAML
+
 sudo systemctl restart google-cloud-ops-agent
 EOF
 
@@ -329,6 +382,9 @@ Run these to verify controls:
   gcloud kms keys describe ${KEY} --keyring ${KEYRING} --location ${KEY_LOC} | egrep 'rotation|nextRotationTime'
   gcloud compute instances list --project ${PROJECT_ID} --filter="name~'${VM1}|${VM2}'" --format="table(name,networkInterfaces[].accessConfigs)"
   gcloud compute firewall-rules list --project ${PROJECT_ID} --filter="name=allow-iap-ssh OR name=allow-internal"
+  gcloud compute routers describe ${NETWORK}-router --region ${REGION} --project ${PROJECT_ID} | sed -n '1,80p'
+  gcloud compute routers nats describe ${NETWORK}-nat --router ${NETWORK}-router --region ${REGION} --project ${PROJECT_ID} | sed -n '1,80p'
+
   # On VM1:
   #   sudo systemctl status continuous-sync
   #   logger -p authpriv.info "audit-test"; sudo tail -n 50 /var/log/audit/audit.log
