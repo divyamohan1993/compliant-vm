@@ -171,31 +171,39 @@ fi
 # tiny pause for propagation
 
 
-# ---- 1c) Enforce OS Login on project + instances and pin a dedicated key ----
+# ---- 1c) Enforce OS Login on project + (only if VM already exists) ----
 ACCOUNT="$(gcloud config get-value account)"
 
-# Ensure roles for your user (idempotent)
+# Roles required for OS Login over IAP (idempotent)
 iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.osAdminLogin"
 iam_bind_if_missing "user:${ACCOUNT}" "roles/iap.tunnelResourceAccessor"
 iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.viewer"
 
-# Enforce OS Login everywhere (safe to re-run)
+# Project-wide OS Login (safe & idempotent)
 gcloud compute project-info add-metadata --project "$PROJECT_ID" \
   --metadata enable-oslogin=TRUE
+
+# Only touch instance metadata if the VM already exists (skip otherwise)
 for inst in "$VM1" "$VM2"; do
-  gcloud compute instances add-metadata "$inst" --zone "$ZONE" --project "$PROJECT_ID" \
-    --metadata enable-oslogin=TRUE
+  if exists_vm "$inst"; then
+    gcloud compute instances add-metadata "$inst" \
+      --zone "$ZONE" --project "$PROJECT_ID" \
+      --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE
+  else
+    log "Instance $inst not found yet; OS Login will be set at create time"
+  fi
 done
 
-# Create a dedicated OS Login key and register it with 24h TTL
+# Create (if needed) and register a dedicated OS Login key (24h TTL)
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/gce_oslogin}"
 if [[ ! -f "$SSH_KEY.pub" ]]; then
   ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "$ACCOUNT"
 fi
+# Always refresh TTL so subsequent SSH in this run never expires
 gcloud compute os-login ssh-keys add --project "$PROJECT_ID" \
   --key-file="$SSH_KEY.pub" --ttl=24h || true
 
-# Resolve the exact OS Login Linux username and force gcloud to use it
+# Resolve OS Login Linux username and pin it for SSH
 OS_LOGIN_USER="$(gcloud compute os-login describe-profile --project "$PROJECT_ID" \
   --format='value(posixAccounts[?primary=true].username)')"
 if [[ -z "$OS_LOGIN_USER" ]]; then
@@ -203,29 +211,28 @@ if [[ -z "$OS_LOGIN_USER" ]]; then
     --format='value(posixAccounts[0].username)')"
 fi
 
-# Common SSH flags (IAP + correct key + correct user)
+# Use IAP + pinned key + correct Linux user for all SSH calls in this script
 SSH_COMMON=(--tunnel-through-iap --ssh-key-file="$SSH_KEY" --ssh-flag="-l ${OS_LOGIN_USER}")
 
 sleep 5
 
+# # ---- 1d) Pin a dedicated OS Login SSH key and force gcloud to use it ----
+# SSH_KEY="${SSH_KEY:-$HOME/.ssh/gce_oslogin}"
+# if [[ ! -f "$SSH_KEY.pub" ]]; then
+#   ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "$ACCOUNT"
+# fi
 
-# ---- 1d) Pin a dedicated OS Login SSH key and force gcloud to use it ----
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/gce_oslogin}"
-if [[ ! -f "$SSH_KEY.pub" ]]; then
-  ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "$ACCOUNT"
-fi
+# # Register (or refresh) the pubkey in OS Login (24h TTL to survive long runs)
+# gcloud compute os-login ssh-keys add \
+#   --key-file="$SSH_KEY.pub" \
+#   --ttl=24h \
+#   --project "$PROJECT_ID" || true
 
-# Register (or refresh) the pubkey in OS Login (24h TTL to survive long runs)
-gcloud compute os-login ssh-keys add \
-  --key-file="$SSH_KEY.pub" \
-  --ttl=24h \
-  --project "$PROJECT_ID" || true
+# # tiny propagation pause
+# sleep 5
 
-# tiny propagation pause
-sleep 5
-
-# Common SSH flags for every gcloud compute ssh call
-SSH_COMMON=(--tunnel-through-iap --ssh-key-file="$SSH_KEY")
+# # Common SSH flags for every gcloud compute ssh call
+# SSH_COMMON=(--tunnel-through-iap --ssh-key-file="$SSH_KEY")
 
 # ---- 2) KMS (CMEK) -------------------------------------------------------------
 section "2) KMS (CMEK) with rotation schedule"
@@ -297,9 +304,10 @@ COMMON_FLAGS=(--project "$PROJECT_ID" --zone "$ZONE" --no-address \
   --service-account "$SA_EMAIL" --scopes "https://www.googleapis.com/auth/cloud-platform" \
   --image-family "$IMG_FAMILY" --image-project "$IMG_PROJECT" \
   --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
-  --metadata enable-oslogin=TRUE,serial-port-enable=FALSE \
+  --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE,serial-port-enable=FALSE \
   --boot-disk-kms-key "$BOOT_KMS" --boot-disk-size "20GB" \
   --tags "sync")
+
 
 if ! exists_vm "$VM1"; then
   gcloud compute instances create "$VM1" "${COMMON_FLAGS[@]}"
@@ -316,6 +324,18 @@ IP1="$(gcloud compute instances describe "$VM1" --zone "$ZONE" --format='get(net
 IP2="$(gcloud compute instances describe "$VM2" --zone "$ZONE" --format='get(networkInterfaces[0].networkIP)' --project "$PROJECT_ID")"
 log "$VM1 @ $IP1"
 log "$VM2 @ $IP2"
+
+# Enforce OS Login + block project keys on instances now that they exist
+# (covers first-run create and any older instances missing these bits)
+for inst in "$VM1" "$VM2"; do
+  gcloud compute instances add-metadata "$inst" --zone "$ZONE" --project "$PROJECT_ID" \
+    --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE || true
+done
+
+# Refresh OS Login key TTL again right before SSH phases (belt-and-suspenders)
+gcloud compute os-login ssh-keys add --project "$PROJECT_ID" \
+  --key-file="$SSH_KEY.pub" --ttl=24h || true
+
 
 # ---- 5) Bootstrap packages / audit on both VMs --------------------------------
 section "5) Bootstrap auditd + Ops Agent + rsync + inotify"
