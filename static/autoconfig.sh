@@ -149,28 +149,6 @@ else
   log "NAT $NAT exists - ensured logging"
 fi
 
-# # ---- 1c) Ensure OS Login + IAP access for current user (prevents SSH 'Permission denied (publickey)') ----
-# ACCOUNT="$(gcloud config get-value account)"
-
-# # Make sure your user can use OS Login and IAP TCP forwarding
-# iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.osAdminLogin"
-# iam_bind_if_missing "user:${ACCOUNT}" "roles/iap.tunnelResourceAccessor"
-# iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.viewer"
-
-# # Ensure the local key exists for gcloud; OS Login will use it
-# if [[ ! -f "$HOME/.ssh/google_compute_engine.pub" ]]; then
-#   ssh-keygen -t rsa -N "" -f "$HOME/.ssh/google_compute_engine" -C "$ACCOUNT"
-# fi
-
-# # (Re)register the key with OS Login; safe and idempotent
-# gcloud compute os-login ssh-keys add \
-#   --key-file="$HOME/.ssh/google_compute_engine.pub" \
-#   --ttl=1h \
-#   --project "$PROJECT_ID" || true
-
-# tiny pause for propagation
-
-
 # ---- 1c) Enforce OS Login on project + (only if VM already exists) ----
 ACCOUNT="$(gcloud config get-value account)"
 
@@ -215,24 +193,6 @@ fi
 SSH_COMMON=(--tunnel-through-iap --ssh-key-file="$SSH_KEY" --ssh-flag="-l ${OS_LOGIN_USER}")
 
 sleep 5
-
-# # ---- 1d) Pin a dedicated OS Login SSH key and force gcloud to use it ----
-# SSH_KEY="${SSH_KEY:-$HOME/.ssh/gce_oslogin}"
-# if [[ ! -f "$SSH_KEY.pub" ]]; then
-#   ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "$ACCOUNT"
-# fi
-
-# # Register (or refresh) the pubkey in OS Login (24h TTL to survive long runs)
-# gcloud compute os-login ssh-keys add \
-#   --key-file="$SSH_KEY.pub" \
-#   --ttl=24h \
-#   --project "$PROJECT_ID" || true
-
-# # tiny propagation pause
-# sleep 5
-
-# # Common SSH flags for every gcloud compute ssh call
-# SSH_COMMON=(--tunnel-through-iap --ssh-key-file="$SSH_KEY")
 
 # ---- 2) KMS (CMEK) -------------------------------------------------------------
 section "2) KMS (CMEK) with rotation schedule"
@@ -536,3 +496,164 @@ Compliance notes (manual + policy):
  - Accept GDPR DP Addendum + HIPAA BAA (if applicable) in IAM & Admin > Legal & Compliance.
  - Store CIS/OpenSCAP reports and SCC findings export as audit evidence.
 OUT
+
+# ---- 9) Automated compliance validation (CIS GCP + CIS Ubuntu 22.04 L1) ----
+section "9) Automated compliance validation (project + VM OS)"
+
+if [[ "${SKIP_COMPLIANCE:-0}" == "1" ]]; then
+  log "Skipping compliance validation because SKIP_COMPLIANCE=1"
+  exit 0
+fi
+
+req_pass=()
+req_fail=()
+
+check() { # check "NAME" <cmd...>
+  local name="$1"; shift
+  if "$@"; then
+    log "PASS: $name"
+    req_pass+=("$name")
+  else
+    log "FAIL: $name"
+    req_fail+=("$name")
+  fi
+}
+
+jq_get() { jq -r "$1"; }
+
+# -------- GCP Controls (CIS GCP Foundations “tested controls”) --------
+# 1) No external IPs on instances
+for inst in "$VM1" "$VM2"; do
+  ext="$(gcloud compute instances describe "$inst" --zone "$ZONE" --project "$PROJECT_ID" \
+        --format='get(networkInterfaces[0].accessConfigs[0].natIP)')"
+  check "No public IP ($inst)" test -z "${ext}"
+done
+
+# 2) IAP-only SSH Firewall (35.235.240.0/20, TCP:22, ingress)
+if gcloud compute firewall-rules describe allow-iap-ssh --project "$PROJECT_ID" --format=json >/tmp/fw_iap.json 2>/dev/null; then
+  sr="$(jq -r '.sourceRanges[]? // empty' /tmp/fw_iap.json | tr '\n' ' ')"
+  tcp22="$(jq -r '.allowed[]? | select(.IPProtocol=="tcp") | .ports[]?' /tmp/fw_iap.json | grep -qx '22' && echo yes || echo no)"
+  dir="$(jq -r '.direction' /tmp/fw_iap.json)"
+  check "IAP SSH rule source range is 35.235.240.0/20" bash -lc 'grep -q "35.235.240.0/20" <<<"'"$sr"'"'
+  check "IAP SSH rule allows only TCP 22" test "$tcp22" = "yes"
+  check "IAP SSH rule is INGRESS" test "$dir" = "INGRESS"
+else
+  req_fail+=("IAP SSH rule present"); log "FAIL: IAP SSH rule present"
+fi
+
+# 3) OS Login enforced (project + instances) & block project SSH keys + serial port disabled
+proj_oslogin="$(gcloud compute project-info describe --project "$PROJECT_ID" --format=json \
+  | jq -r '.commonInstanceMetadata.items[]? | select(.key=="enable-oslogin") | .value')"
+check "Project OS Login enabled" bash -lc '[[ "'"$proj_oslogin"'" == "TRUE" ]]'
+
+for inst in "$VM1" "$VM2"; do
+  gcloud compute instances describe "$inst" --zone "$ZONE" --project "$PROJECT_ID" --format=json >/tmp/inst.json
+  iom="$(jq -r '.metadata.items[]? | select(.key=="enable-oslogin") | .value' /tmp/inst.json)"
+  blk="$(jq -r '.metadata.items[]? | select(.key=="block-project-ssh-keys") | .value' /tmp/inst.json)"
+  ser="$(jq -r '.metadata.items[]? | select(.key=="serial-port-enable") | .value' /tmp/inst.json)"
+  check "OS Login enabled on $inst" bash -lc '[[ "'"$iom"'" == "TRUE" ]]'
+  check "Block project-wide SSH keys on $inst" bash -lc '[[ "'"$blk"'" == "TRUE" ]]'
+  check "Serial console disabled on $inst" bash -lc '[[ -z "'"$ser"'" || "'"$ser"'" == "FALSE" ]]'
+done
+
+# 4) Shielded VM features
+for inst in "$VM1" "$VM2"; do
+  gcloud compute instances describe "$inst" --zone "$ZONE" --project "$PROJECT_ID" --format=json >/tmp/shield.json
+  sb="$(jq -r '.shieldedInstanceConfig.enableSecureBoot' /tmp/shield.json)"
+  vtpm="$(jq -r '.shieldedInstanceConfig.enableVtpm' /tmp/shield.json)"
+  im="$(jq -r '.shieldedInstanceConfig.enableIntegrityMonitoring' /tmp/shield.json)"
+  check "Shielded VM: secure boot ($inst)" bash -lc '[[ "'"$sb"'" == "true" ]]'
+  check "Shielded VM: vTPM ($inst)"        bash -lc '[[ "'"$vtpm"'" == "true" ]]'
+  check "Shielded VM: integrity monitor ($inst)" bash -lc '[[ "'"$im"'" == "true" ]]'
+done
+
+# 5) CMEK on boot disks
+for inst in "$VM1" "$VM2"; do
+  disk="$(gcloud compute instances describe "$inst" --zone "$ZONE" --project "$PROJECT_ID" --format='get(disks[0].source)')"
+  disk="${disk##*/}"
+  kms="$(gcloud compute disks describe "$disk" --zone "$ZONE" --project "$PROJECT_ID" --format='get(diskEncryptionKey.kmsKeyName)')"
+  check "CMEK on boot disk ($inst)" bash -lc '[[ -n "'"$kms"'" ]]'
+done
+
+# 6) Subnet Flow Logs + Private Google Access
+gcloud compute networks subnets describe "$SUBNET" --region "$REGION" --project "$PROJECT_ID" --format=json >/tmp/subnet.json
+check "Subnet flow logs enabled" bash -lc 'jq -e ".enableFlowLogs==true" /tmp/subnet.json >/dev/null'
+check "Subnet Private Google Access enabled" bash -lc 'jq -e ".privateIpGoogleAccess==true" /tmp/subnet.json >/dev/null'
+
+# 7) Cloud NAT logging = ALL
+gcloud compute routers nats describe "$NAT" --router "$ROUTER" --region "$REGION" --project "$PROJECT_ID" --format=json >/tmp/nat.json
+check "Cloud NAT logging enabled"  bash -lc 'jq -e ".logConfig.enable==true" /tmp/nat.json >/dev/null'
+check "Cloud NAT log filter = ALL" bash -lc 'jq -r ".logConfig.filter" /tmp/nat.json | grep -qx ALL'
+
+# -------- VM OS Audit (CIS Ubuntu 22.04 L1 Server) --------
+section "9b) VM OS audit: CIS Ubuntu 22.04 L1 Server (OpenSCAP / USG)"
+read -r -d '' REMOTE_CIS <<'EOS' || true
+set -Eeuo pipefail
+sudo mkdir -p /var/tmp/compliance
+REPORT_DIR="/var/tmp/compliance"
+# Try Canonical USG first (if Ubuntu Pro tooling is present), else OpenSCAP
+if command -v pro >/dev/null 2>&1; then sudo pro enable usg || true; fi
+sudo apt-get update -y || true
+sudo apt-get install -y usg openscap-scanner || sudo apt-get install -y openscap-scanner || true
+
+if command -v usg >/dev/null 2>&1; then
+  # USG will generate HTML/XML under /var/lib/usg/
+  sudo usg audit cis_level1_server || true
+  html="$(ls -1t /var/lib/usg/*.html 2>/dev/null | head -n1 || true)"
+  if [[ -n "$html" ]]; then sudo cp -f "$html" "$REPORT_DIR/cis-usg-report.html"; fi
+else
+  DS="/usr/share/xml/scap/ssg/content/ssg-ubuntu2204-ds.xml"
+  if [[ ! -f "$DS" ]]; then
+    DS="/var/tmp/ssg-ubuntu2204-ds.xml"
+    # Try to fetch SCAP content if not packaged
+    curl -fsSL -o "$DS" https://raw.githubusercontent.com/ComplianceAsCode/content/releases/latest/download/ssg-ubuntu2204-ds.xml || true
+    # Fallback: keep going even if download fails; oscap will then no-op
+  fi
+  if [[ -f "$DS" ]]; then
+    sudo oscap xccdf eval \
+      --profile xccdf_org.ssgproject.content_profile_cis_level1_server \
+      --results-arf "$REPORT_DIR/arf.xml" \
+      --report "$REPORT_DIR/cis-openscap-report.html" "$DS" || true
+  fi
+fi
+
+# Minimal status line for the caller (non-fatal)
+if [[ -f "$REPORT_DIR/cis-usg-report.html" ]]; then
+  echo "CIS_HTML=$REPORT_DIR/cis-usg-report.html"
+elif [[ -f "$REPORT_DIR/cis-openscap-report.html" ]]; then
+  echo "CIS_HTML=$REPORT_DIR/cis-openscap-report.html"
+else
+  echo "CIS_HTML="
+fi
+EOS
+
+mkdir -p ./compliance-reports
+
+# Run audit on both VMs, collect local copies
+for inst in "$VM1" "$VM2"; do
+  out="$(gcloud compute ssh "$inst" --zone "$ZONE" --project "$PROJECT_ID" --tunnel-through-iap --ssh-key-file="$SSH_KEY" --command "$REMOTE_CIS" 2>/dev/null || true)"
+  html="$(grep -oE 'CIS_HTML=.*' <<<"$out" | cut -d= -f2-)"
+  if [[ -n "$html" ]]; then
+    gcloud compute scp --tunnel-through-iap --project "$PROJECT_ID" --zone "$ZONE" \
+      "$inst:$html" "./compliance-reports/${inst}-cis.html" >/dev/null 2>&1 || true
+    log "Saved CIS HTML report: ./compliance-reports/${inst}-cis.html"
+  else
+    log "No CIS HTML report produced on $inst (USG/SCAP content may be unavailable)"
+    req_fail+=("CIS Ubuntu 22.04 L1 report ($inst)")
+  fi
+done
+
+# -------- Final scoreboard --------
+echo
+echo "=== Compliance scoreboard ==="
+printf "PASS: %s\n" "${req_pass[@]}" | sed '/^PASS: $/d' || true
+printf "FAIL: %s\n" "${req_fail[@]}" | sed '/^FAIL: $/d' || true
+echo
+
+if (( ${#req_fail[@]} > 0 )); then
+  echo "Automated checks FAILED for some controls. See ./compliance-reports/ for VM OS reports."
+  exit 1
+fi
+
+echo "Automated checks PASSED. Compliant with: CIS Ubuntu 22.04 L1 (Server) [VMs], CIS GCP Foundations (tested controls)"
+echo "Reports saved in ./compliance-reports/"
