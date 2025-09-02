@@ -122,10 +122,17 @@ else
   fail_list+=("IAP-only SSH ingress present (tcp:22 from 35.235.240.0/20)")
 fi
 
-gcloud compute firewall-rules list --project "$PROJECT_ID" \
-  --filter="network=$NETWORK AND direction=INGRESS AND disabled=false" --format=json > /tmp/dpdp_fws.json
+# List all and filter locally; .network is a selfLink, so match by suffix.
+gcloud compute firewall-rules list --project "$PROJECT_ID" --format=json > /tmp/dpdp_fws.json || echo "[]" > /tmp/dpdp_fws.json
+
 check "No 0.0.0.0/0 ingress on VPC $NETWORK" \
-  bash -lc '! jq -e '\''.[]?|.sourceRanges[]? | select(.=="0.0.0.0/0")'\'' /tmp/dpdp_fws.json >/dev/null'
+  bash -lc 'jq -e --arg net "'"$NETWORK"'" '\''[
+      .[]
+      | select(.network|endswith("/" + $net))
+      | select(.direction=="INGRESS")
+      | select(.disabled!=true)
+      | .sourceRanges[]?
+    ] | index("0.0.0.0/0") == null'\'' /tmp/dpdp_fws.json >/dev/null'
 
 # Network observability
 gcloud compute networks subnets describe "$SUBNET" --region "$REGION" --project "$PROJECT_ID" --format=json >/tmp/dpdp_subnet.json
@@ -134,10 +141,21 @@ check "VPC Flow Logs enabled on subnet" bash -lc 'jq -e ".enableFlowLogs==true" 
 check "Cloud NAT logging enabled (ALL)"  bash -lc 'jq -e ".logConfig.enable==true and .logConfig.filter==\"ALL\"" /tmp/dpdp_nat.json >/dev/null'
 
 # Breach detection signal: alerts + channels exist (readiness to notify Board & individuals)
-gcloud monitoring alert-policies list --format=json > /tmp/dpdp_alerts.json || true
-gcloud monitoring channels list --format=json > /tmp/dpdp_channels.json || true
-check "At least 1 Monitoring alert policy exists" bash -lc 'jq -e "length>=1" /tmp/dpdp_alerts.json >/dev/null'
+ALERTS_JSON="/tmp/dpdp_alerts.json"
+if ! (
+  gcloud monitoring policies list --format=json > "$ALERTS_JSON" 2>/dev/null \
+  || gcloud monitoring alert-policies list --format=json > "$ALERTS_JSON" 2>/dev/null \
+  || gcloud beta  monitoring policies list --format=json > "$ALERTS_JSON" 2>/dev/null \
+  || gcloud alpha monitoring policies list --format=json > "$ALERTS_JSON" 2>/dev/null
+); then
+  echo "[]" > "$ALERTS_JSON"
+fi
+
+gcloud monitoring channels list --format=json > /tmp/dpdp_channels.json || echo "[]" > /tmp/dpdp_channels.json
+
+check "At least 1 Monitoring alert policy exists" bash -lc 'jq -e "length>=1" '"$ALERTS_JSON"' >/dev/null'
 check "At least 1 Notification channel exists"   bash -lc 'jq -e "length>=1" /tmp/dpdp_channels.json >/dev/null'
+
 
 # ---- Strong control for §8(5): encryption at rest (CMEK) ---------------------
 section "DPDPA §8(5) — Encryption at rest (strong control)"
