@@ -341,12 +341,12 @@ done
 if ! sudo apt-get install -y \
       -o Dpkg::Options::=--force-confdef \
       -o Dpkg::Options::=--force-confold \
-      google-cloud-ops-agent auditd inotify-tools rsync; then
+      google-cloud-ops-agent auditd inotify-tools rsync openssl curl; then
   sudo apt-get update -y || true
   sudo apt-get install -y \
       -o Dpkg::Options::=--force-confdef \
       -o Dpkg::Options::=--force-confold \
-      google-cloud-ops-agent auditd inotify-tools rsync
+      google-cloud-ops-agent auditd inotify-tools rsync openssl curl
 fi
 
 sudo systemctl enable --now auditd
@@ -423,57 +423,89 @@ fi
 gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
   "sudo -u sync bash -lc 'H=/home/sync; install -d -m 700 -o sync -g sync \$H/.ssh; grep -q \"${PUBKEY}\" \$H/.ssh/authorized_keys 2>/dev/null || echo \"from=${IP1} ${PUBKEY}\" >> \$H/.ssh/authorized_keys; chmod 600 \$H/.ssh/authorized_keys'"
 
-# ---- 7) Continuous rsync service (idempotent) ---------------------------------
-section "7) Continuous encrypted sync service (VM1 -> VM2)"
-read -r -d '' SYNC_SCRIPT <<EOF || true
+section "7) Secure rsync every 5m with confirmation (replaces continuous-sync)"
+
+# Disable & remove the old continuous unit if it exists (idempotent)
+gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+  'sudo systemctl disable --now continuous-sync 2>/dev/null || true; \
+   sudo rm -f /etc/systemd/system/continuous-sync.service /usr/local/bin/continuous-sync.sh; \
+   sudo systemctl daemon-reload || true'
+
+# New rsync script (runs once; timer triggers it every 5 minutes)
+read -r -d '' RSYNC_SCRIPT <<'EOF' || true
 #!/usr/bin/env bash
 set -Eeuo pipefail
 DEST_USER="sync"
-DEST_HOST="${IP2}"
+DEST_HOST="%IP2%"
 SRC_DIR="/data/"
 DEST_DIR="/data/"
-SSH_OPTS="-o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -i /home/sync/.ssh/id_ed25519"
-SSH_OPTS="$SSH_OPTS -o UserKnownHostsFile=/home/sync/.ssh/known_hosts"
-rsync -az --delete -e "ssh \$SSH_OPTS" "\$SRC_DIR" "\${DEST_USER}@\${DEST_HOST}:\${DEST_DIR}"
-inotifywait -m -r -e modify,create,delete,move "\$SRC_DIR" | while read -r _; do
-  rsync -az --delete -e "ssh \$SSH_OPTS" "\$SRC_DIR" "\${DEST_USER}@\${DEST_HOST}:\${DEST_DIR}"
-done
-EOF
+SSH_OPTS="-o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=/home/sync/.ssh/known_hosts -i /home/sync/.ssh/id_ed25519"
 
-read -r -d '' SYNC_SERVICE <<'EOF' || true
+# Gather local (name:size) for dummy files
+mapfile -t local_list < <(find "$SRC_DIR" -maxdepth 1 -type f -name "dummy-*.bin" -printf "%f:%s\n" | sort)
+
+# Sync (SSH provides encryption; no -z to avoid compressing zeros)
+rsync -a --delete -e "ssh $SSH_OPTS" "$SRC_DIR" "${DEST_USER}@${DEST_HOST}:${DEST_DIR}"
+
+# Confirm on vm-b: every local (name:size) must exist remotely
+remote_list="$(ssh $SSH_OPTS ${DEST_USER}@${DEST_HOST} 'find "'"$DEST_DIR"'" -maxdepth 1 -type f -name "dummy-*.bin" -printf "%f:%s\n" | sort')"
+
+ok=1
+for entry in "${local_list[@]}"; do
+  if ! grep -qx "$entry" <<<"$remote_list"; then
+    echo "MISMATCH: $entry missing or size differs on ${DEST_HOST}" >&2
+    ok=0
+  fi
+done
+
+[[ $ok -eq 1 ]] && echo "SYNC_OK $(date -u +%FT%TZ) : ${#local_list[@]} files confirmed on ${DEST_HOST}"
+exit $(( ok ? 0 : 1 ))
+EOF
+RSYNC_SCRIPT="${RSYNC_SCRIPT//%IP2%/$IP2}"
+
+read -r -d '' RSYNC_SERVICE <<'EOF' || true
 [Unit]
-Description=Continuous encrypted sync of /data to peer
+Description=Rsync /data to peer and verify presence and size on peer
 After=network-online.target
 Wants=network-online.target
 
 [Service]
+Type=oneshot
 User=sync
 Group=sync
-ExecStart=/usr/local/bin/continuous-sync.sh
-Restart=always
-RestartSec=5
+ExecStart=/usr/local/bin/rsync-to-peer.sh
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-MemoryDenyWriteExecute=true
-LockPersonality=true
-Environment=HOME=/home/sync
-WorkingDirectory=/home/sync
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Install/update script + service atomically
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "echo '${SYNC_SCRIPT}' | sudo tee /usr/local/bin/continuous-sync.sh >/dev/null && sudo chmod 755 /usr/local/bin/continuous-sync.sh"
+read -r -d '' RSYNC_TIMER <<'EOF' || true
+[Unit]
+Description=Run rsync-to-peer every 5 minutes
 
-# Only (re)write unit if missing or content differs
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=5min
+Unit=rsync-to-peer.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# Install script + unit + timer
 gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo bash -lc 'UNIT=/etc/systemd/system/continuous-sync.service; TMP=\$(mktemp); echo \"${SYNC_SERVICE}\" > \$TMP; if ! cmp -s \$TMP \$UNIT; then sudo cp \$TMP \$UNIT; fi; sudo systemctl daemon-reload; sudo systemctl enable --now continuous-sync; systemctl is-active continuous-sync; sudo journalctl -u continuous-sync -n 20 --no-pager'"
+  "echo '${RSYNC_SCRIPT}' | sudo tee /usr/local/bin/rsync-to-peer.sh >/dev/null && sudo chmod 755 /usr/local/bin/rsync-to-peer.sh"
+
+gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+  "echo '${RSYNC_SERVICE}' | sudo tee /etc/systemd/system/rsync-to-peer.service >/dev/null; \
+   echo '${RSYNC_TIMER}'   | sudo tee /etc/systemd/system/rsync-to-peer.timer   >/dev/null; \
+   sudo systemctl daemon-reload; \
+   sudo systemctl enable --now rsync-to-peer.timer; \
+   systemctl list-timers --all | sed -n '1,8p'"
 
 # ---- 8) Summary / Verification hints ------------------------------------------
 section "8) Summary & verification"
@@ -499,6 +531,210 @@ Compliance notes (manual + policy):
  - Accept GDPR DP Addendum + HIPAA BAA (if applicable) in IAM & Admin > Legal & Compliance.
  - Store CIS/OpenSCAP reports and SCC findings export as audit evidence.
 OUT
+
+section "9) Dummy data generator on vm-a (100MB/2m, 3GB cap)"
+
+read -r -d '' GEN_SCRIPT <<'EOF' || true
+#!/usr/bin/env bash
+set -Eeuo pipefail
+DIR="/data"
+SIZE_MB=100
+MAX_BYTES=$((3*1024*1024*1024))
+
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+file="${DIR}/dummy-${ts}.bin"
+
+# Fast, deterministic 100MB to exercise encryption without compression
+dd if=/dev/zero of="$file" bs=1M count="${SIZE_MB}" status=none
+chown sync:sync "$file"
+
+# Rotate: delete oldest dummy-*.bin until under 3GB
+total="$(du -sb "$DIR" | cut -f1)"
+while (( total > MAX_BYTES )); do
+  old="$(ls -1tr "$DIR"/dummy-*.bin 2>/dev/null | head -n 1 || true)"
+  [[ -n "$old" ]] || break
+  rm -f -- "$old"
+  total="$(du -sb "$DIR" | cut -f1)"
+done
+EOF
+
+read -r -d '' GEN_SERVICE <<'EOF' || true
+[Unit]
+Description=Create 100MB dummy file in /data and rotate to 3GB
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sync
+Group=sync
+ExecStart=/usr/local/bin/generate-dummy.sh
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+read -r -d '' GEN_TIMER <<'EOF' || true
+[Unit]
+Description=Run generate-dummy every 2 minutes
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=2min
+Unit=generate-dummy.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+  "echo '${GEN_SCRIPT}'  | sudo tee /usr/local/bin/generate-dummy.sh >/dev/null && sudo chmod 755 /usr/local/bin/generate-dummy.sh; \
+   echo '${GEN_SERVICE}' | sudo tee /etc/systemd/system/generate-dummy.service >/dev/null; \
+   echo '${GEN_TIMER}'   | sudo tee /etc/systemd/system/generate-dummy.timer   >/dev/null; \
+   sudo systemctl daemon-reload; \
+   sudo systemctl enable --now generate-dummy.timer; \
+   systemctl list-timers --all | sed -n '1,12p'"
+
+section "10) HTTPS API on vm-a (TLS with pinned CA) + vm-b fetcher"
+
+# --- Create CA, server cert (SAN = vm-a IP), and minimal HTTPS API on vm-a ---
+gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+  "sudo install -d -m 700 /etc/ssl/vma; \
+   sudo bash -lc 'cat >/etc/ssl/vma/openssl.cnf <<EOF
+[req]
+distinguished_name = dn
+req_extensions = req_ext
+prompt = no
+[dn]
+CN = vm-a-internal
+[req_ext]
+subjectAltName = @alt_names
+[alt_names]
+IP.1 = ${IP1}
+DNS.1 = vm-a
+EOF
+openssl genrsa -out /etc/ssl/vma/ca.key 4096
+openssl req -x509 -new -key /etc/ssl/vma/ca.key -sha256 -days 3650 -out /etc/ssl/vma/ca.crt -subj \"/CN=vm-a-internal-ca\"
+openssl genrsa -out /etc/ssl/vma/server.key 2048
+openssl req -new -key /etc/ssl/vma/server.key -out /etc/ssl/vma/server.csr -config /etc/ssl/vma/openssl.cnf
+openssl x509 -req -in /etc/ssl/vma/server.csr -CA /etc/ssl/vma/ca.crt -CAkey /etc/ssl/vma/ca.key -CAcreateserial -out /etc/ssl/vma/server.crt -days 825 -sha256 -extensions req_ext -extfile /etc/ssl/vma/openssl.cnf
+chmod 600 /etc/ssl/vma/*.key'"
+
+# Simple HTTPS API: /health and /files (lists /data)
+read -r -d '' API_PY <<'PY' || true
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json, os, ssl
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200); self.send_header("Content-Type","application/json"); self.end_headers()
+            self.wfile.write(json.dumps({"status":"ok"}).encode())
+        elif self.path == "/files":
+            files=[]
+            for n in sorted(os.listdir("/data")):
+                p=os.path.join("/data",n)
+                if os.path.isfile(p): files.append({"name":n,"size":os.path.getsize(p)})
+            self.send_response(200); self.send_header("Content-Type","application/json"); self.end_headers()
+            self.wfile.write(json.dumps(files).encode())
+        else:
+            self.send_response(404); self.end_headers()
+
+if __name__=="__main__":
+    httpd=HTTPServer(("0.0.0.0",8443),H)
+    ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain("/etc/ssl/vma/server.crt","/etc/ssl/vma/server.key")
+    httpd.socket=ctx.wrap_socket(httpd.socket, server_side=True)
+    httpd.serve_forever()
+PY
+
+read -r -d '' API_SVC <<'EOF' || true
+[Unit]
+Description=Minimal HTTPS API on vm-a (TLS pinned CA)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=sync
+Group=sync
+ExecStart=/usr/bin/python3 /usr/local/bin/secure-api.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+  "echo '${API_PY}'  | sudo tee /usr/local/bin/secure-api.py >/dev/null && sudo chmod 755 /usr/local/bin/secure-api.py; \
+   echo '${API_SVC}' | sudo tee /etc/systemd/system/secure-api.service >/dev/null; \
+   sudo systemctl daemon-reload; sudo systemctl enable --now secure-api; \
+   sleep 1; sudo ss -lntp | awk 'NR==1||/8443/'"
+
+# --- Copy vm-a CA to vm-b and set up a fetcher that calls the API every 5m ---
+CA_PEM="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command 'sudo cat /etc/ssl/vma/ca.crt')"
+
+gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+  "sudo install -d -m 0755 /etc/ssl/localcerts; \
+   sudo tee /etc/ssl/localcerts/vm-a-ca.crt >/dev/null <<'PEM'
+${CA_PEM}
+PEM
+   sudo chmod 644 /etc/ssl/localcerts/vm-a-ca.crt"
+
+read -r -d '' FETCH_SCRIPT <<'EOF' || true
+#!/usr/bin/env bash
+set -Eeuo pipefail
+CA=/etc/ssl/localcerts/vm-a-ca.crt
+BASE="https://%IP1%:8443"
+curl --silent --show-error --fail --cacert "$CA" "$BASE/health"
+curl --silent --show-error --fail --cacert "$CA" "$BASE/files" | head -c 200
+echo
+EOF
+FETCH_SCRIPT="${FETCH_SCRIPT//%IP1%/$IP1}"
+
+read -r -d '' FETCH_SERVICE <<'EOF' || true
+[Unit]
+Description=Poll vm-a HTTPS API with pinned CA
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fetch-vma-api.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+read -r -d '' FETCH_TIMER <<'EOF' || true
+[Unit]
+Description=Fetch vm-a API every 5 minutes
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=5min
+Unit=fetch-vma-api.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+  "echo '${FETCH_SCRIPT}'  | sudo tee /usr/local/bin/fetch-vma-api.sh >/dev/null && sudo chmod 755 /usr/local/bin/fetch-vma-api.sh; \
+   echo '${FETCH_SERVICE}' | sudo tee /etc/systemd/system/fetch-vma-api.service >/dev/null; \
+   echo '${FETCH_TIMER}'   | sudo tee /etc/systemd/system/fetch-vma-api.timer   >/dev/null; \
+   sudo systemctl daemon-reload; \
+   sudo systemctl enable --now fetch-vma-api.timer; \
+   systemctl list-timers --all | sed -n '1,12p'"
+
 
 # ---------------------- Compliance Checker Callers -------------------------
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
