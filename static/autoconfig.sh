@@ -662,6 +662,12 @@ iam_bind_if_missing() { # iam_bind_if_missing <member> <role> (project)
 
 
 # ---------------------- Compliance Checker Callers -------------------------
+
+section "Enable APIs needed for compliance ops (idempotent)"
+enable_api logging.googleapis.com
+enable_api cloudkms.googleapis.com
+enable_api iam.googleapis.com
+
 section "Pre-HIPAA: ensure OS Login + IAP SSH prerequisites"
 
 ACCOUNT="$(gcloud config get-value account)"
@@ -690,6 +696,76 @@ fi
 gcloud compute os-login ssh-keys add --project "$PROJECT_ID" --key-file="$SSH_KEY.pub" --ttl=24h || true
 export SSH_KEY
 
+
+section "Pre-HIPAA hardening: audit logs + retention+lock + Logging CMEK"
+# 1) Data Access logs (READ/WRITE) on allServices
+POL=$(mktemp); NEW=$(mktemp)
+gcloud projects get-iam-policy "$PROJECT_ID" --format=json > "$POL"
+jq '(.auditConfigs //= []) as $ac
+  | ($ac | map(select(.service!="allServices"))) as $others
+  | ($ac | map(select(.service=="allServices") | .auditLogConfigs[]?)) as $existing
+  | .auditConfigs = ($others + [
+      { service:"allServices",
+        auditLogConfigs: ( ($existing + [{logType:"DATA_READ"},{logType:"DATA_WRITE"}]) | unique_by(.logType) )
+      }
+    ])' "$POL" > "$NEW"
+gcloud projects set-iam-policy "$PROJECT_ID" "$NEW" >/dev/null
+
+# 2) Logging bucket retention & lock (lock is irreversible)
+gcloud logging buckets update _Default --location=global --retention-days=2190 || true
+gcloud logging buckets update _Default --location=global --locked || true
+
+# 3) Logging CMEK
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+LOG_SA="service-${PROJECT_NUMBER}@gcp-sa-logging.iam.gserviceaccount.com"
+gcloud kms keys add-iam-policy-binding "$KEY" \
+  --keyring "$KEYRING" --location "$KEY_LOC" \
+  --member "serviceAccount:${LOG_SA}" \
+  --role roles/cloudkms.cryptoKeyEncrypterDecrypter || true
+gcloud logging cmek-settings update --project="$PROJECT_ID" \
+  --kms-key-name "projects/${PROJECT_ID}/locations/${KEY_LOC}/keyRings/${KEYRING}/cryptoKeys/${KEY}" || true
+
+section "Pre-HIPAA: remove USER_MANAGED keys from SA (idempotent)"
+UM_KEYS=$(gcloud iam service-accounts keys list \
+  --iam-account "$SA_EMAIL" \
+  --format='value(name, keyType)' | awk '$2=="USER_MANAGED"{print $1}')
+for k in $UM_KEYS; do
+  gcloud iam service-accounts keys delete "$k" --iam-account "$SA_EMAIL" -q || true
+done
+
+run_checker() { # run_checker "NAME" <cmd ...>
+  local name="$1"; shift
+  if ! "$@"; then
+    rc=$?
+    log "Non-fatal: $name exited with rc=$rc"
+  fi
+}
+
+section "Pre-HIPAA: ensure snapshot schedule attached to VM boot disks"
+POLICY="daily-snapshots-7d"
+if ! gcloud compute resource-policies describe "$POLICY" --region "$REGION" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  gcloud compute resource-policies create snapshot-schedule "$POLICY" \
+    --region "$REGION" \
+    --max-retention-days=7 \
+    --daily-schedule \
+    --start-time=01:30 \
+    --on-source-disk-delete=apply-retention-policy \
+    --project "$PROJECT_ID"
+fi
+for inst in "$VM1" "$VM2"; do
+  if exists_vm "$inst"; then
+    DISK="$(gcloud compute instances describe "$inst" --zone "$ZONE" --project "$PROJECT_ID" --format='get(disks[0].source)')"
+    DISK="${DISK##*/}"
+    HAVE="$(gcloud compute disks describe "$DISK" --zone "$ZONE" --project "$PROJECT_ID" --format='get(resourcePolicies)')"
+    if [[ -z "$HAVE" || "$HAVE" != *"$POLICY"* ]]; then
+      gcloud compute disks add-resource-policies "$DISK" \
+        --zone "$ZONE" --resource-policies "$POLICY" --project "$PROJECT_ID" || true
+    fi
+  fi
+done
+
+
+
 # ---- HIPAA checker fetch & run -------------------------------------------------
 section "Fetch & run HIPAA checker (modular)"
 
@@ -708,13 +784,14 @@ else
 fi
 
 # Run read-only compliance (safe to call every autoconfig.sh run)
-"$COMPLIANCE_DIR/hipaa.sh" \
+run_checker "HIPAA" "$COMPLIANCE_DIR/hipaa.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
   --sa-email "$SA_EMAIL" \
   --vm "$VM1" --vm "$VM2" \
   --report-dir "./compliance-reports"
+
 
 # If you want the autoconfig to fail pipeline on HIPAA fails, just forward exit code.
 

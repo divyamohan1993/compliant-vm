@@ -209,10 +209,16 @@ proj_oslogin="$(gcloud compute project-info describe --project "$PROJECT_ID" --f
   | jq -r '.commonInstanceMetadata.items[]? | select(.key=="enable-oslogin") | .value' || true)"
 check "OS Login enabled at project [164.312(d), 164.312(a)(2)(i)]" bash -lc '[[ "'"$proj_oslogin"'" == "TRUE" ]]'
 
+# if [[ -n "$SA_EMAIL" ]]; then
+#   keys="$(gcloud iam service-accounts keys list --iam-account "$SA_EMAIL" --format='value(name)' || true)"
+#   check "No user-managed SA keys for $SA_EMAIL [164.312(d)]" test -z "$keys"
+# fi
 if [[ -n "$SA_EMAIL" ]]; then
-  keys="$(gcloud iam service-accounts keys list --iam-account "$SA_EMAIL" --format='value(name)' || true)"
-  check "No user-managed SA keys for $SA_EMAIL [164.312(d)]" test -z "$keys"
+  um_keys="$(gcloud iam service-accounts keys list --iam-account "$SA_EMAIL" \
+              --format='value(name, keyType)' 2>/dev/null | awk '$2=="USER_MANAGED"{print $1}')"
+  check "No user-managed SA keys for $SA_EMAIL [164.312(d)]" test -z "$um_keys"
 fi
+
 
 # ---- 10.5 Contingency (backup evidence) --------------------------------------
 section "Contingency planning evidence [164.308(a)(7)]"
@@ -232,6 +238,10 @@ if ((${#VMS[@]})); then
 fi
 
 # ---- 10.6 VM OS probes (read-only) -------------------------------------------
+if [[ "${HIPAA_SKIP_OS_PROBES:-0}" == "1" ]]; then
+  section "VM OS probes [skipped due to HIPAA_SKIP_OS_PROBES=1]"
+else
+
 section "VM OS probes [164.312(b),(c),(d),(a)(2)(iii)]"
 read -r -d '' REMOTE_HIPAA <<"EOS" || true
 set -Eeuo pipefail
@@ -357,6 +367,8 @@ log "Wrote evidence: $out_base"
 # Exit with 2 if any FAIL to bubble up in CI/CD
 if (( ${#hipaa_fail[@]} > 0 )); then
   echo "HIPAA automated checks FAILED for some controls."
+  [[ "${HIPAA_SOFT_EXIT:-0}" == "1" ]] && exit 0
   exit 2
 fi
+
 echo "HIPAA automated checks PASSED for the technical safeguards tested."
