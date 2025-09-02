@@ -777,7 +777,8 @@ jq '
           (
             ( [ $ac[]? | select(.service=="allServices") ][0] // {service:"allServices"} )
             | .auditLogConfigs = (
-                ((.auditLogConfigs // []) + [{logType:"DATA_READ"},{logType:"DATA_WRITE"}])
+                ((.auditLogConfigs // [])
+                  + [{logType:"ADMIN_READ"},{logType:"DATA_READ"},{logType:"DATA_WRITE"}])
                 | unique_by(.logType)
               )
           )

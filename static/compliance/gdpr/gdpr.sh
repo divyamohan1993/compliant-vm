@@ -140,10 +140,17 @@ else
   fail_list+=("IAP-only SSH ingress [Art. 32(1)(b) confidentiality]")
 fi
 
-gcloud compute firewall-rules list --project "$PROJECT_ID" \
-  --filter="network=$NETWORK AND direction=INGRESS AND disabled=false" --format=json > /tmp/gdpr_fws.json
+# List all and filter locally; API puts full selfLink in .network
+gcloud compute firewall-rules list --project "$PROJECT_ID" --format=json > /tmp/gdpr_fws.json || echo "[]" >/tmp/gdpr_fws.json
+
 check "No 0.0.0.0/0 ingress on $NETWORK [Art. 25 & 32 privacy by default/confidentiality]" \
-  bash -lc '! jq -e '\''.[]?|.sourceRanges[]? | select(.=="0.0.0.0/0")'\'' /tmp/gdpr_fws.json >/dev/null'
+  bash -lc 'jq -e --arg net "'"$NETWORK"'" '\''[
+      .[] 
+      | select(.network|endswith("/" + $net))
+      | select(.direction=="INGRESS")
+      | select(.disabled!=true)
+      | .sourceRanges[]?
+    ] | index("0.0.0.0/0") == null'\'' /tmp/gdpr_fws.json >/dev/null'
 
 # Availability & resilience → snapshot policy as restoration evidence
 snap_ok=1
