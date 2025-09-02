@@ -662,6 +662,34 @@ iam_bind_if_missing() { # iam_bind_if_missing <member> <role> (project)
 
 
 # ---------------------- Compliance Checker Callers -------------------------
+section "Pre-HIPAA: ensure OS Login + IAP SSH prerequisites"
+
+ACCOUNT="$(gcloud config get-value account)"
+# Grant minimal roles (idempotent)
+iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.osAdminLogin"
+iam_bind_if_missing "user:${ACCOUNT}" "roles/iap.tunnelResourceAccessor"
+iam_bind_if_missing "user:${ACCOUNT}" "roles/compute.viewer"
+
+# Project-wide OS Login
+gcloud compute project-info add-metadata --project "$PROJECT_ID" \
+  --metadata enable-oslogin=TRUE
+
+# Instance metadata (if VMs exist)
+for inst in "$VM1" "$VM2"; do
+  if exists_vm "$inst"; then
+    gcloud compute instances add-metadata "$inst" --zone "$ZONE" --project "$PROJECT_ID" \
+      --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE,serial-port-enable=FALSE || true
+  fi
+done
+
+# Add a fresh OS Login SSH key (24h TTL) and export for hipaa.sh to use
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/gce_oslogin}"
+if [[ ! -f "$SSH_KEY.pub" ]]; then
+  ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "$ACCOUNT"
+fi
+gcloud compute os-login ssh-keys add --project "$PROJECT_ID" --key-file="$SSH_KEY.pub" --ttl=24h || true
+export SSH_KEY
+
 # ---- HIPAA checker fetch & run -------------------------------------------------
 section "Fetch & run HIPAA checker (modular)"
 

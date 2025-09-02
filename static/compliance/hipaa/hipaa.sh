@@ -92,6 +92,24 @@ OS_LOGIN_USER="$(gcloud compute os-login describe-profile --project "$PROJECT_ID
 SSH_COMMON=("${SSH_COMMON_BASE[@]}")
 [[ -n "$OS_LOGIN_USER" ]] && SSH_COMMON+=(--ssh-flag="-l ${OS_LOGIN_USER}")
 
+# --- Helper: run gcloud ssh without tripping ERR trap; capture output + rc
+ssh_probe() {
+  local host="$1" cmd="$2" tmp rc
+  tmp="$(mktemp)"
+  (
+    set +e
+    trap '' ERR
+    gcloud compute ssh "$host" --zone "$ZONE" --project "$PROJECT_ID" \
+      "${SSH_COMMON[@]}" --command "$cmd" >"$tmp" 2>/dev/null
+    echo $? >"$tmp.rc"
+  )
+  rc="$(cat "$tmp.rc" 2>/dev/null || echo 1)"
+  cat "$tmp"
+  rm -f "$tmp" "$tmp.rc"
+  return "$rc"
+}
+
+
 # ---- Check helpers ------------------------------------------------------------
 hipaa_pass=(); hipaa_fail=(); hipaa_manual=(); probe_json=()
 
@@ -234,11 +252,8 @@ EOS
 if ((${#VMS[@]})); then
   for inst in "${VMS[@]}"; do
     # We *only* read; if SSH fails, mark FAILs for that host
-    set +e
-    out="$(gcloud compute ssh "$inst" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE_HIPAA" 2>/dev/null)"
-    rc=$?
-    set -e
-    if (( rc != 0 )); then
+        # NEW (ERR-safe)
+    if ! out="$(ssh_probe "$inst" "$REMOTE_HIPAA")"; then
       log "WARN: SSH probe failed on $inst (marking probe checks as FAIL)"
       hipaa_fail+=("Auditd active on $inst [164.312(b)]")
       hipaa_fail+=("Audit rules present on $inst [164.312(b)]")
@@ -251,7 +266,7 @@ if ((${#VMS[@]})); then
       hipaa_fail+=("Time sync (NTP) enabled on $inst [164.312(b)]")
       hipaa_fail+=("Auto logoff (TMOUT) set on $inst [164.312(a)(2)(iii)]")
       continue
-    fi
+    fi    
 
     echo "$out" | sed 's/^/  ['"$inst"'] /'
     host="$(grep '^HOST=' <<<"$out" | cut -d= -f2-)"
