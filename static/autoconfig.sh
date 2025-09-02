@@ -668,7 +668,7 @@ COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
 # Pin to a specific version/branch/commit if you like:
-HIPAA_URL="${HIPAA_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/hipaa.sh}"
+HIPAA_URL="${HIPAA_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/hipaa/hipaa.sh}"
 
 # Always re-download latest unless pinned via HIPAA_PIN=1
 if [[ "${HIPAA_PIN:-0}" == "0" ]]; then
@@ -695,7 +695,7 @@ section "Fetch & run GDPR checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-GDPR_URL="${GDPR_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/gdpr.sh}"
+GDPR_URL="${GDPR_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/gdpr/gdpr.sh}"
 
 if [[ "${GDPR_PIN:-0}" == "0" ]]; then
   wget -qO "$COMPLIANCE_DIR/gdpr.sh" "$GDPR_URL"
@@ -718,7 +718,7 @@ section "Fetch & run DPDPR checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-DPDPR_URL="${DPDPR_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/dpdpr.sh}"
+DPDPR_URL="${DPDPR_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/dpdpr/dpdpr.sh}"
 
 # Always refresh unless pinned
 if [[ "${DPDPR_PIN:-0}" == "0" ]]; then
@@ -742,7 +742,7 @@ section "Fetch & run PCI DSS v4.0.1 Level 1 checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-PCIDSS_URL="${PCIDSS_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/pcidss-l1.sh}"
+PCIDSS_URL="${PCIDSS_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/pcidss-l1/pcidss-l1.sh}"
 
 # Always refresh unless pinned for reproducibility
 if [[ "${PCIDSS_PIN:-0}" == "0" ]]; then
@@ -766,7 +766,7 @@ section "Fetch & run SOX §404 ICFR (ITGC) checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-SOX_URL="${SOX_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/sox.sh}"
+SOX_URL="${SOX_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/sox/sox.sh}"
 
 if [[ "${SOX_PIN:-0}" == "0" ]]; then
   wget -qO "$COMPLIANCE_DIR/sox.sh" "$SOX_URL"
@@ -789,7 +789,7 @@ section "Fetch & run GLBA (FTC Safeguards Rule) checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-GLBA_URL="${GLBA_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/glba.sh}"
+GLBA_URL="${GLBA_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/glba/glba.sh}"
 
 # Always refresh unless pinned
 if [[ "${GLBA_PIN:-0}" == "0" ]]; then
@@ -813,7 +813,7 @@ section "Fetch & run SOC 2 checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-SOC2_URL="${SOC2_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/soc2.sh}"
+SOC2_URL="${SOC2_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/soc2/soc2.sh}"
 
 if [[ "${SOC2_PIN:-0}" == "0" ]]; then
   wget -qO "$COMPLIANCE_DIR/soc2.sh" "$SOC2_URL"
@@ -836,7 +836,7 @@ section "Fetch & run ISO/IEC 27001:2022 checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-ISO27001_URL="${ISO27001_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/iso27001.sh}"
+ISO27001_URL="${ISO27001_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/iso27001/iso27001.sh}"
 
 if [[ "${ISO27001_PIN:-0}" == "0" ]]; then
   wget -qO "$COMPLIANCE_DIR/iso27001.sh" "$ISO27001_URL"
@@ -859,7 +859,7 @@ section "Fetch & run ISO/IEC 27017 checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-ISO27017_URL="${ISO27017_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/iso27017.sh}"
+ISO27017_URL="${ISO27017_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/iso27017/iso27017.sh}"
 
 if [[ "${ISO27017_PIN:-0}" == "0" ]]; then
   wget -qO "$COMPLIANCE_DIR/iso27017.sh" "$ISO27017_URL"
@@ -883,7 +883,7 @@ section "Fetch & run NIST SP 800-53 Rev.5 checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-NIST80053_URL="${NIST80053_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/nist80053.sh}"
+NIST80053_URL="${NIST80053_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/nist80053/nist80053.sh}"
 
 if [[ "${NIST80053_PIN:-0}" == "0" ]]; then
   wget -qO "$COMPLIANCE_DIR/nist80053.sh" "$NIST80053_URL"
@@ -906,7 +906,7 @@ section "Fetch & run NIST CSF 2.0 checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-NIST_CSF_URL="${NIST_CSF_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/nistcsf.sh}"
+NIST_CSF_URL="${NIST_CSF_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/nistcsf/nistcsf.sh}"
 
 if [[ "${NIST_CSF_PIN:-0}" == "0" ]]; then
   wget -qO "$COMPLIANCE_DIR/nistcsf.sh" "$NIST_CSF_URL"
@@ -929,7 +929,7 @@ section "Fetch & run BSA/AML checker (modular)"
 COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
 mkdir -p "$COMPLIANCE_DIR"
 
-BSA_URL="${BSA_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/bsa.sh}"
+BSA_URL="${BSA_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/bsa/bsa.sh}"
 
 if [[ "${BSA_PIN:-0}" == "0" ]]; then
   wget -qO "$COMPLIANCE_DIR/bsa.sh" "$BSA_URL"
