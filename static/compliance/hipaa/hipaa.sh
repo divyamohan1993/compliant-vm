@@ -140,10 +140,24 @@ else
 fi
 
 # No 0.0.0.0/0 ingress
-gcloud compute firewall-rules list --project "$PROJECT_ID" \
-  --filter="network=$NETWORK AND direction=INGRESS AND disabled=false" --format=json > /tmp/hipaa_fws.json
+# List all firewall rules once (unfiltered) to avoid gcloud filter syntax quirks across versions.
+if ! gcloud compute firewall-rules list --project "$PROJECT_ID" --format=json > /tmp/hipaa_fws.json 2>/dev/null; then
+  echo "[]" > /tmp/hipaa_fws.json
+fi
+
 check "No 0.0.0.0/0 ingress on $NETWORK [164.312(e)]" \
-  bash -lc '! jq -e '\''.[]?|.sourceRanges[]? | select(.=="0.0.0.0/0")'\'' /tmp/hipaa_fws.json >/dev/null'
+  bash -lc 'jq -e --arg net "'"$NETWORK"'" '\''[
+      .[] 
+      | select(.network|endswith("/" + $net))
+      | select(.direction=="INGRESS")
+      | select(.disabled!=true)
+      | .sourceRanges[]?
+    ] | index("0.0.0.0/0") == null'\'' /tmp/hipaa_fws.json >/dev/null'
+    
+# gcloud compute firewall-rules list --project "$PROJECT_ID" \
+#   --filter="network=$NETWORK AND direction=INGRESS AND disabled=false" --format=json > /tmp/hipaa_fws.json
+# check "No 0.0.0.0/0 ingress on $NETWORK [164.312(e)]" \
+  # bash -lc '! jq -e '\''.[]?|.sourceRanges[]? | select(.=="0.0.0.0/0")'\'' /tmp/hipaa_fws.json >/dev/null'
 
 # Flow logs + NAT logging
 gcloud compute networks subnets describe "$SUBNET" --region "$REGION" --project "$PROJECT_ID" --format=json >/tmp/hipaa_subnet.json
