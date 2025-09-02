@@ -27,13 +27,11 @@ KEY="${KEY:-}"
 KEY_LOC="${KEY_LOC:-}"
 SA_EMAIL="${SA_EMAIL:-}"
 
-# Repeatable --vm flags -> VMS array
 declare -a VMS=()
 REPORT_DIR="${REPORT_DIR:-./compliance-reports}"
-# If set, also write a timestamped copy
 STAMPED="${STAMPED:-1}"
 
-SSH_KEY="${SSH_KEY:-}"         # optional: use your OS Login key if you want to pin it
+SSH_KEY="${SSH_KEY:-}"
 SSH_COMMON_BASE=(--tunnel-through-iap)
 [[ -n "${SSH_KEY}" ]] && SSH_COMMON_BASE+=(--ssh-key-file="$SSH_KEY")
 
@@ -81,10 +79,8 @@ need gcloud; need jq; need awk; need sed; need grep; need date
 
 mkdir -p "$REPORT_DIR"
 
-# Derive project number (for context only)
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 
-# Resolve OS Login username (no mutation; we don't upload keys here)
 OS_LOGIN_USER="$(gcloud compute os-login describe-profile --project "$PROJECT_ID" \
   --format='value(posixAccounts[?primary=true].username)' || true)"
 [[ -z "$OS_LOGIN_USER" ]] && OS_LOGIN_USER="$(gcloud compute os-login describe-profile --project "$PROJECT_ID" \
@@ -92,13 +88,13 @@ OS_LOGIN_USER="$(gcloud compute os-login describe-profile --project "$PROJECT_ID
 SSH_COMMON=("${SSH_COMMON_BASE[@]}")
 [[ -n "$OS_LOGIN_USER" ]] && SSH_COMMON+=(--ssh-flag="-l ${OS_LOGIN_USER}")
 
-# --- Helper: run gcloud ssh without tripping ERR trap; capture output + rc
 ssh_probe() {
+  # Run SSH command and always return a numeric RC without tripping ERR
   local host="$1" cmd="$2" tmp rc
   tmp="$(mktemp)"
   (
     set +e
-    trap '' ERR
+    trap - ERR
     gcloud compute ssh "$host" --zone "$ZONE" --project "$PROJECT_ID" \
       "${SSH_COMMON[@]}" --command "$cmd" >"$tmp" 2>/dev/null
     echo $? >"$tmp.rc"
@@ -109,8 +105,6 @@ ssh_probe() {
   return "$rc"
 }
 
-
-# ---- Check helpers ------------------------------------------------------------
 hipaa_pass=(); hipaa_fail=(); hipaa_manual=(); probe_json=()
 
 check() { # check "NAME [CFR]" <cmd...>
@@ -138,7 +132,6 @@ check "Cloud Logging protected with CMEK [164.312(a)(2)(iv), 164.312(b)]" \
 
 # ---- 10.2 Transmission Security / Exposure -----------------------------------
 section "Transmission security & exposure [164.312(e)]"
-# No public IPs on VMs
 if ((${#VMS[@]})); then
   for inst in "${VMS[@]}"; do
     ext="$(gcloud compute instances describe "$inst" --zone "$ZONE" --project "$PROJECT_ID" \
@@ -147,7 +140,6 @@ if ((${#VMS[@]})); then
   done
 fi
 
-# IAP-only SSH
 if gcloud compute firewall-rules describe allow-iap-ssh --project "$PROJECT_ID" --format=json >/tmp/hipaa_fw_iap.json 2>/dev/null; then
   check "IAP-only SSH ingress [164.312(e)]" \
     bash -lc 'jq -e '\''(.direction=="INGRESS")
@@ -157,12 +149,8 @@ else
   hipaa_fail+=("IAP-only SSH ingress [164.312(e)]")
 fi
 
-# No 0.0.0.0/0 ingress
-# List all firewall rules once (unfiltered) to avoid gcloud filter syntax quirks across versions.
-if ! gcloud compute firewall-rules list --project "$PROJECT_ID" --format=json > /tmp/hipaa_fws.json 2>/dev/null; then
-  echo "[]" > /tmp/hipaa_fws.json
-fi
-
+# List all and filter with jq (portable)
+gcloud compute firewall-rules list --project "$PROJECT_ID" --format=json > /tmp/hipaa_fws.json 2>/dev/null || echo "[]" >/tmp/hipaa_fws.json
 check "No 0.0.0.0/0 ingress on $NETWORK [164.312(e)]" \
   bash -lc 'jq -e --arg net "'"$NETWORK"'" '\''[
       .[] 
@@ -171,13 +159,7 @@ check "No 0.0.0.0/0 ingress on $NETWORK [164.312(e)]" \
       | select(.disabled!=true)
       | .sourceRanges[]?
     ] | index("0.0.0.0/0") == null'\'' /tmp/hipaa_fws.json >/dev/null'
-    
-# gcloud compute firewall-rules list --project "$PROJECT_ID" \
-#   --filter="network=$NETWORK AND direction=INGRESS AND disabled=false" --format=json > /tmp/hipaa_fws.json
-# check "No 0.0.0.0/0 ingress on $NETWORK [164.312(e)]" \
-  # bash -lc '! jq -e '\''.[]?|.sourceRanges[]? | select(.=="0.0.0.0/0")'\'' /tmp/hipaa_fws.json >/dev/null'
 
-# Flow logs + NAT logging
 gcloud compute networks subnets describe "$SUBNET" --region "$REGION" --project "$PROJECT_ID" --format=json >/tmp/hipaa_subnet.json
 gcloud compute routers nats describe "$NAT" --router "$ROUTER" --region "$REGION" --project "$PROJECT_ID" --format=json >/tmp/hipaa_nat.json
 check "VPC Flow Logs enabled [164.312(b)]" bash -lc 'jq -e ".enableFlowLogs==true" /tmp/hipaa_subnet.json >/dev/null'
@@ -196,8 +178,7 @@ fi
 
 if ((${#VMS[@]})); then
   for inst in "${VMS[@]}"; do
-    disk="$(gcloud compute instances describe "$inst" --zone "$ZONE" --project "$PROJECT_ID" --format='get(disks[0].source)' || true)"
-    disk="${disk##*/}"
+    disk="$(gcloud compute instances describe "$inst" --zone "$ZONE" --project "$PROJECT_ID" --format='get(disks[0].source)' || true)"; disk="${disk##*/}"
     kms="$(gcloud compute disks describe "$disk" --zone "$ZONE" --project "$PROJECT_ID" --format='get(diskEncryptionKey.kmsKeyName)' || true)"
     check "CMEK on boot disk ($inst) [164.312(a)(2)(iv)]" bash -lc '[[ -n "'"$kms"'" ]]'
   done
@@ -209,24 +190,18 @@ proj_oslogin="$(gcloud compute project-info describe --project "$PROJECT_ID" --f
   | jq -r '.commonInstanceMetadata.items[]? | select(.key=="enable-oslogin") | .value' || true)"
 check "OS Login enabled at project [164.312(d), 164.312(a)(2)(i)]" bash -lc '[[ "'"$proj_oslogin"'" == "TRUE" ]]'
 
-# if [[ -n "$SA_EMAIL" ]]; then
-#   keys="$(gcloud iam service-accounts keys list --iam-account "$SA_EMAIL" --format='value(name)' || true)"
-#   check "No user-managed SA keys for $SA_EMAIL [164.312(d)]" test -z "$keys"
-# fi
 if [[ -n "$SA_EMAIL" ]]; then
   um_keys="$(gcloud iam service-accounts keys list --iam-account "$SA_EMAIL" \
-              --format='value(name, keyType)' 2>/dev/null | awk '$2=="USER_MANAGED"{print $1}')"
+            --format='value(name, keyType)' 2>/dev/null | awk '$2=="USER_MANAGED"{print $1}')"
   check "No user-managed SA keys for $SA_EMAIL [164.312(d)]" test -z "$um_keys"
 fi
-
 
 # ---- 10.5 Contingency (backup evidence) --------------------------------------
 section "Contingency planning evidence [164.308(a)(7)]"
 snap_ok=1
 if ((${#VMS[@]})); then
   for inst in "${VMS[@]}"; do
-    disk="$(gcloud compute instances describe "$inst" --zone "$ZONE" --project "$PROJECT_ID" --format='get(disks[0].source)' || true)"
-    disk="${disk##*/}"
+    disk="$(gcloud compute instances describe "$inst" --zone "$ZONE" --project "$PROJECT_ID" --format='get(disks[0].source)' || true)"; disk="${disk##*/}"
     policies="$(gcloud compute disks describe "$disk" --zone "$ZONE" --project "$PROJECT_ID" --format='get(resourcePolicies)' || true)"
     [[ -z "$policies" ]] && snap_ok=0
   done
@@ -241,9 +216,9 @@ fi
 if [[ "${HIPAA_SKIP_OS_PROBES:-0}" == "1" ]]; then
   section "VM OS probes [skipped due to HIPAA_SKIP_OS_PROBES=1]"
 else
-
-section "VM OS probes [164.312(b),(c),(d),(a)(2)(iii)]"
-read -r -d '' REMOTE_HIPAA <<"EOS" || true
+  section "VM OS probes [164.312(b),(c),(d),(a)(2)(iii)]"
+  # Safer heredoc -> string capture (no read -d)
+  REMOTE_HIPAA=$(cat <<'EOS'
 set -Eeuo pipefail
 echo "HOST=$(hostname)"
 state_auditd="$(systemctl is-active auditd || true)"; echo "AUDITD=$state_auditd"
@@ -258,64 +233,62 @@ ua_on="$(grep -hoE 'APT::Periodic::Unattended-Upgrade\s+\"?1\"?' /etc/apt/apt.co
 ntp="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo no)"; echo "NTP_SYNC=$ntp"
 tmout="$(grep -RhsE '^\s*TMOUT=([3-9][0-9]{2,}|[1-9][0-9]{3,})' /etc/profile /etc/profile.d/* 2>/dev/null | wc -l)"; echo "TMOUT_SET=$tmout"
 EOS
+)
+  if ((${#VMS[@]})); then
+    for inst in "${VMS[@]}"; do
+      if ! out="$(ssh_probe "$inst" "$REMOTE_HIPAA")"; then
+        log "WARN: SSH probe failed on $inst (marking probe checks as FAIL)"
+        hipaa_fail+=("Auditd active on $inst [164.312(b)]")
+        hipaa_fail+=("Audit rules present on $inst [164.312(b)]")
+        hipaa_fail+=("Ops Agent running on $inst [164.312(b)]")
+        hipaa_fail+=("SSH password auth disabled on $inst [164.312(d)]")
+        hipaa_fail+=("SSH root login disabled on $inst [164.312(d)]")
+        hipaa_fail+=("AIDE installed on $inst [164.312(c)(1)]")
+        hipaa_fail+=("AIDE baseline present on $inst [164.312(c)(1)]")
+        hipaa_fail+=("Unattended security updates enabled on $inst [164.308(a)(1)]")
+        hipaa_fail+=("Time sync (NTP) enabled on $inst [164.312(b)]")
+        hipaa_fail+=("Auto logoff (TMOUT) set on $inst [164.312(a)(2)(iii)]")
+        continue
+      fi
 
-if ((${#VMS[@]})); then
-  for inst in "${VMS[@]}"; do
-    # We *only* read; if SSH fails, mark FAILs for that host
-        # NEW (ERR-safe)
-    if ! out="$(ssh_probe "$inst" "$REMOTE_HIPAA")"; then
-      log "WARN: SSH probe failed on $inst (marking probe checks as FAIL)"
-      hipaa_fail+=("Auditd active on $inst [164.312(b)]")
-      hipaa_fail+=("Audit rules present on $inst [164.312(b)]")
-      hipaa_fail+=("Ops Agent running on $inst [164.312(b)]")
-      hipaa_fail+=("SSH password auth disabled on $inst [164.312(d)]")
-      hipaa_fail+=("SSH root login disabled on $inst [164.312(d)]")
-      hipaa_fail+=("AIDE installed on $inst [164.312(c)(1)]")
-      hipaa_fail+=("AIDE baseline present on $inst [164.312(c)(1)]")
-      hipaa_fail+=("Unattended security updates enabled on $inst [164.308(a)(1)]")
-      hipaa_fail+=("Time sync (NTP) enabled on $inst [164.312(b)]")
-      hipaa_fail+=("Auto logoff (TMOUT) set on $inst [164.312(a)(2)(iii)]")
-      continue
-    fi    
+      echo "$out" | sed 's/^/  ['"$inst"'] /'
+      auditd="$(grep '^AUDITD=' <<<"$out" | cut -d= -f2-)"
+      rules="$(grep '^AUDIT_RULES=' <<<"$out" | cut -d= -f2-)"
+      ops="$(grep '^OPS_AGENT=' <<<"$out" | cut -d= -f2-)"
+      aidev="$(grep '^AIDE_VER=' <<<"$out" | cut -d= -f2-)"
+      aidedb="$(grep '^AIDE_DB=' <<<"$out" | cut -d= -f2-)"
+      sshpw="$(grep '^SSH_PASSAUTH=' <<<"$out" | cut -d= -f2-)"
+      sshroot="$(grep '^SSH_ROOTLOGIN=' <<<"$out" | cut -d= -f2-)"
+      ua="$(grep '^UNATT_UPGR=' <<<"$out" | cut -d= -f2-)"
+      uaon="$(grep '^UNATT_ENABLED=' <<<"$out" | cut -d= -f2-)"
+      ntp="$(grep '^NTP_SYNC=' <<<"$out" | cut -d= -f2-)"
+      tmout="$(grep '^TMOUT_SET=' <<<"$out" | cut -d= -f2-)"
 
-    echo "$out" | sed 's/^/  ['"$inst"'] /'
-    host="$(grep '^HOST=' <<<"$out" | cut -d= -f2-)"
-    auditd="$(grep '^AUDITD=' <<<"$out" | cut -d= -f2-)"
-    rules="$(grep '^AUDIT_RULES=' <<<"$out" | cut -d= -f2-)"
-    ops="$(grep '^OPS_AGENT=' <<<"$out" | cut -d= -f2-)"
-    aidev="$(grep '^AIDE_VER=' <<<"$out" | cut -d= -f2-)"
-    aidedb="$(grep '^AIDE_DB=' <<<"$out" | cut -d= -f2-)"
-    sshpw="$(grep '^SSH_PASSAUTH=' <<<"$out" | cut -d= -f2-)"
-    sshroot="$(grep '^SSH_ROOTLOGIN=' <<<"$out" | cut -d= -f2-)"
-    ua="$(grep '^UNATT_UPGR=' <<<"$out" | cut -d= -f2-)"
-    uaon="$(grep '^UNATT_ENABLED=' <<<"$out" | cut -d= -f2-)"
-    ntp="$(grep '^NTP_SYNC=' <<<"$out" | cut -d= -f2-)"
-    tmout="$(grep '^TMOUT_SET=' <<<"$out" | cut -d= -f2-)"
+      check "Auditd active on $inst [164.312(b)]" bash -lc '[[ "'"$auditd"'" == "active" ]]'
+      check "Audit rules present on $inst [164.312(b)]" bash -lc '[[ "'"$rules"'" -ge 1 ]]'
+      check "Ops Agent running on $inst [164.312(b)]" bash -lc '[[ "'"$ops"'" == "active" ]]'
+      check "SSH password auth disabled on $inst [164.312(d)]" bash -lc '[[ "'"$sshpw"'" == "no" ]]'
+      check "SSH root login disabled on $inst [164.312(d)]" bash -lc '[[ "'"$sshroot"'" == "no" || "'"$sshroot"'" == "prohibit-password" ]]'
+      check "AIDE installed on $inst [164.312(c)(1)]" bash -lc '[[ "'"$aidev"'" != "none" ]]'
+      check "AIDE baseline present on $inst [164.312(c)(1)]" bash -lc '[[ "'"$aidedb"'" != "none" ]]'
+      check "Unattended security updates enabled on $inst [164.308(a)(1)]" bash -lc '[[ "'"$ua"'" == *"installed ok installed"* && "'"$uaon"'" -ge 1 ]]'
+      check "Time sync (NTP) enabled on $inst [164.312(b)]" bash -lc '[[ "'"$ntp"'" == "yes" ]]'
+      check "Auto logoff (TMOUT) set on $inst [164.312(a)(2)(iii)]" bash -lc '[[ "'"$tmout"'" -ge 1 ]]'
 
-    check "Auditd active on $inst [164.312(b)]" bash -lc '[[ "'"$auditd"'" == "active" ]]'
-    check "Audit rules present on $inst [164.312(b)]" bash -lc '[[ "'"$rules"'" -ge 1 ]]'
-    check "Ops Agent running on $inst [164.312(b)]" bash -lc '[[ "'"$ops"'" == "active" ]]'
-    check "SSH password auth disabled on $inst [164.312(d)]" bash -lc '[[ "'"$sshpw"'" == "no" ]]'
-    check "SSH root login disabled on $inst [164.312(d)]" bash -lc '[[ "'"$sshroot"'" == "no" || "'"$sshroot"'" == "prohibit-password" ]]'
-    check "AIDE installed on $inst [164.312(c)(1)]" bash -lc '[[ "'"$aidev"'" != "none" ]]'
-    check "AIDE baseline present on $inst [164.312(c)(1)]" bash -lc '[[ "'"$aidedb"'" != "none" ]]'
-    check "Unattended security updates enabled on $inst [164.308(a)(1)]" bash -lc '[[ "'"$ua"'" == *"installed ok installed"* && "'"$uaon"'" -ge 1 ]]'
-    check "Time sync (NTP) enabled on $inst [164.312(b)]" bash -lc '[[ "'"$ntp"'" == "yes" ]]'
-    check "Auto logoff (TMOUT) set on $inst [164.312(a)(2)(iii)]" bash -lc '[[ "'"$tmout"'" -ge 1 ]]'
-
-    probe_json+=("{
-      \"instance\":\"$inst\",\"auditd\":\"$auditd\",\"audit_rules\":$rules,
-      \"ops_agent\":\"$ops\",\"aide\": \"$aidev\",\"aide_db\":\"$aidedb\",
-      \"ssh_passwordauth\":\"$sshpw\",\"ssh_rootlogin\":\"$sshroot\",
-      \"unattended_upgrades\":\"$ua\",\"unattended_enabled\":$uaon,
-      \"ntp_sync\":\"$ntp\",\"tmout_set\":$tmout
-    }")
-  done
-else
-  log "Skipping VM OS probes (no --vm provided)."
+      probe_json+=("{
+        \"instance\":\"$inst\",\"auditd\":\"$auditd\",\"audit_rules\":$rules,
+        \"ops_agent\":\"$ops\",\"aide\": \"$aidev\",\"aide_db\":\"$aidedb\",
+        \"ssh_passwordauth\":\"$sshpw\",\"ssh_rootlogin\":\"$sshroot\",
+        \"unattended_upgrades\":\"$ua\",\"unattended_enabled\":$uaon,
+        \"ntp_sync\":\"$ntp\",\"tmout_set\":$tmout
+      }")
+    done
+  else
+    log "Skipping VM OS probes (no --vm provided)."
+  fi
 fi
 
-# ---- 10.7 Always-manual evidences --------------------------------------------
+# ---- 10.7 Manual evidences ----------------------------------------------------
 section "Manual evidences (cannot be proven via script)"
 note "Executed Google Cloud HIPAA BAA for this account/project [Contractual prerequisite]"
 note "Formal Risk Analysis & Risk Management documented and current [164.308(a)(1)]"
@@ -325,7 +298,6 @@ note "Information system activity review process (log review schedule & owners) 
 
 # ---- Scoreboard & Evidence file ----------------------------------------------
 section "HIPAA Security Rule Scoreboard"
-# Deduplicate lines while preserving order
 dedup() { awk '!seen[$0]++'; }
 printf "PASS: %s\n" "${hipaa_pass[@]}"   | sed '/^PASS: $/d'   | dedup || true
 printf "FAIL: %s\n" "${hipaa_fail[@]}"   | sed '/^FAIL: $/d'   | dedup || true
@@ -364,7 +336,6 @@ if [[ "$STAMPED" == "1" ]]; then cp -f "$out_base" "$out_ts"; fi
 log "Wrote evidence: $out_base"
 [[ "$STAMPED" == "1" ]] && log "Wrote timestamped copy: $out_ts"
 
-# Exit with 2 if any FAIL to bubble up in CI/CD
 if (( ${#hipaa_fail[@]} > 0 )); then
   echo "HIPAA automated checks FAILED for some controls."
   [[ "${HIPAA_SOFT_EXIT:-0}" == "1" ]] && exit 0

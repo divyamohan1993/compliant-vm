@@ -795,15 +795,39 @@ echo "Data Access logging (READ & WRITE) ensured for allServices."
 gcloud logging buckets update _Default --location=global --retention-days=2190 || true
 gcloud logging buckets update _Default --location=global --locked || true
 
-# 3) Logging CMEK
+# 3) Logging CMEK (project-scoped) + verify-and-retry + set bucket CMEK
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 LOG_SA="service-${PROJECT_NUMBER}@gcp-sa-logging.iam.gserviceaccount.com"
+DESIRED_KMS="projects/${PROJECT_ID}/locations/${KEY_LOC}/keyRings/${KEYRING}/cryptoKeys/${KEY}"
+
+# Ensure Log Router SA can use the key (idempotent)
 gcloud kms keys add-iam-policy-binding "$KEY" \
   --keyring "$KEYRING" --location "$KEY_LOC" \
   --member "serviceAccount:${LOG_SA}" \
-  --role roles/cloudkms.cryptoKeyEncrypterDecrypter || true
-gcloud logging cmek-settings update --project="$PROJECT_ID" \
-  --kms-key-name "projects/${PROJECT_ID}/locations/${KEY_LOC}/keyRings/${KEYRING}/cryptoKeys/${KEY}" || true
+  --role roles/cloudkms.cryptoKeyEncrypterDecrypter >/dev/null 2>&1 || true
+
+# Set project-level Logging CMEK and verify (handles older gcloud oddities)
+for i in {1..5}; do
+  gcloud logging cmek-settings update \
+    --project="$PROJECT_ID" \
+    --kms-key-name "$DESIRED_KMS" >/dev/null 2>&1 || true
+
+  CURRENT_KMS="$(gcloud logging cmek-settings describe \
+    --project="$PROJECT_ID" \
+    --format='value(kmsKeyName)' 2>/dev/null || true)"
+
+  if [[ "$CURRENT_KMS" == "$DESIRED_KMS" ]]; then
+    log "Logging CMEK is set to desired key"
+    break
+  fi
+  sleep 3
+done
+
+# Also encrypt the _Default logging bucket with the same CMEK (idempotent)
+gcloud logging buckets update _Default \
+  --location=global \
+  --cmek-kms-key="$DESIRED_KMS" >/dev/null 2>&1 || true
+
 
 section "Pre-HIPAA: remove USER_MANAGED keys from SA (idempotent)"
 UM_KEYS=$(gcloud iam service-accounts keys list \
@@ -815,10 +839,12 @@ done
 
 run_checker() { # run_checker "NAME" <cmd ...>
   local name="$1"; shift
-  if ! "$@"; then
-    rc=$?
+  local rc
+  "$@"; rc=$?
+  if (( rc != 0 )); then
     log "Non-fatal: $name exited with rc=$rc"
   fi
+  return 0
 }
 
 section "Pre-HIPAA: ensure snapshot schedule attached to VM boot disks"
