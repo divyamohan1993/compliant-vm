@@ -922,3 +922,28 @@ fi
   --sa-email "$SA_EMAIL" \
   --vm "$VM1" --vm "$VM2" \
   --report-dir "./compliance-reports"
+
+# ---- BSA/AML checker fetch & run ----------------------------------------------
+section "Fetch & run BSA/AML checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+BSA_URL="${BSA_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/bsa.sh}"
+
+if [[ "${BSA_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/bsa.sh" "$BSA_URL"
+  chmod +x "$COMPLIANCE_DIR/bsa.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/bsa.sh" ]] || { echo "Pinned bsa.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/bsa.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports" \
+  --min-bsa-retention-days 1825 \
+  --require-cmek-on-sinks 1
