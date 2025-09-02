@@ -793,7 +793,7 @@ echo "Data Access logging (READ & WRITE) ensured for allServices."
 
 # 2) Logging bucket retention & lock (lock is irreversible)
 gcloud logging buckets update _Default --location=global --retention-days=2190 || true
-gcloud logging buckets update _Default --location=global --locked || true
+gcloud logging buckets update _Default --location=global --locked -q || true
 
 # 3) Logging CMEK (project-scoped) + verify-and-retry + set bucket CMEK
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
@@ -839,12 +839,15 @@ done
 
 run_checker() { # run_checker "NAME" <cmd ...>
   local name="$1"; shift
-  local rc
-  "$@"; rc=$?
-  if (( rc != 0 )); then
+  local rc=0
+  # Using an 'if' guard prevents set -e from aborting on non-zero exit
+  if "$@"; then
+    rc=0
+  else
+    rc=$?
     log "Non-fatal: $name exited with rc=$rc"
   fi
-  return 0
+  return 0  # always continue
 }
 
 section "Pre-HIPAA: ensure snapshot schedule attached to VM boot disks"
@@ -910,7 +913,7 @@ else
   [[ -x "$COMPLIANCE_DIR/gdpr.sh" ]] || { echo "Pinned gdpr.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/gdpr.sh" \
+run_checker "GDPR" "$COMPLIANCE_DIR/gdpr.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
@@ -931,7 +934,7 @@ else
   [[ -x "$COMPLIANCE_DIR/dpdpr.sh" ]] || { echo "Pinned dpdpr.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/dpdpr.sh" \
+run_checker "DPDPR" "$COMPLIANCE_DIR/dpdpr.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
@@ -952,7 +955,7 @@ else
   [[ -x "$COMPLIANCE_DIR/pcidss-l1.sh" ]] || { echo "Pinned pcidss-l1.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/pcidss-l1.sh" \
+run_checker "PCI DSS L1" "$COMPLIANCE_DIR/pcidss-l1.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
@@ -972,7 +975,7 @@ else
   [[ -x "$COMPLIANCE_DIR/sox.sh" ]] || { echo "Pinned sox.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/sox.sh" \
+run_checker "SOX" "$COMPLIANCE_DIR/sox.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
@@ -993,7 +996,7 @@ else
   [[ -x "$COMPLIANCE_DIR/glba.sh" ]] || { echo "Pinned glba.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/glba.sh" \
+run_checker "GLBA" "$COMPLIANCE_DIR/glba.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
@@ -1013,7 +1016,7 @@ else
   [[ -x "$COMPLIANCE_DIR/soc2.sh" ]] || { echo "Pinned soc2.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/soc2.sh" \
+run_checker "SOC 2" "$COMPLIANCE_DIR/soc2.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
@@ -1033,7 +1036,7 @@ else
   [[ -x "$COMPLIANCE_DIR/iso27001.sh" ]] || { echo "Pinned iso27001.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/iso27001.sh" \
+run_checker "ISO 27001" "$COMPLIANCE_DIR/iso27001.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
@@ -1053,7 +1056,7 @@ else
   [[ -x "$COMPLIANCE_DIR/iso27017.sh" ]] || { echo "Pinned iso27017.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/iso27017.sh" \
+run_checker "ISO 27017" "$COMPLIANCE_DIR/iso27017.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --subnet-range "$SUBNET_RANGE" \
   --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
@@ -1074,7 +1077,7 @@ else
   [[ -x "$COMPLIANCE_DIR/nist80053.sh" ]] || { echo "Pinned nist80053.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/nist80053.sh" \
+run_checker "NIST 800-53" "$COMPLIANCE_DIR/nist80053.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
@@ -1094,7 +1097,7 @@ else
   [[ -x "$COMPLIANCE_DIR/nistcsf.sh" ]] || { echo "Pinned nistcsf.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/nistcsf.sh" \
+run_checker "NIST CSF" "$COMPLIANCE_DIR/nistcsf.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
@@ -1114,7 +1117,7 @@ else
   [[ -x "$COMPLIANCE_DIR/bsa.sh" ]] || { echo "Pinned bsa.sh missing/executable bit"; exit 1; }
 fi
 
-"$COMPLIANCE_DIR/bsa.sh" \
+run_checker "BSA/AML" "$COMPLIANCE_DIR/bsa.sh" \
   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
