@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# autoconfig.sh
 # Idempotent, auditable bring-up of two compliant VMs with continuous encrypted sync.
 # Re-runnable: only creates what doesn't exist; updates where needed.
 
@@ -191,6 +192,16 @@ fi
 
 # Use IAP + pinned key + correct Linux user for all SSH calls in this script
 SSH_COMMON=(--tunnel-through-iap --ssh-key-file="$SSH_KEY" --ssh-flag="-l ${OS_LOGIN_USER}")
+
+# ---- Safe remote file writer (idempotent) -------------------------------------
+# Writes $4 to $2 on $1 with mode $3 using base64 over gcloud ssh. Quote-safe.
+remote_put() {
+  local vm="$1" path="$2" mode="$3" data="$4" b64
+  b64="$(printf '%s' "$data" | base64 | tr -d '\n')"
+  gcloud compute ssh "$vm" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+    "echo '$b64' | base64 -d | sudo tee '$path' >/dev/null && sudo chmod '$mode' '$path'"
+}
+
 
 sleep 5
 
@@ -425,13 +436,12 @@ gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@
 
 section "7) Secure rsync every 5m with confirmation (replaces continuous-sync)"
 
-# Disable & remove the old continuous unit if it exists (idempotent)
+# Disable & remove any old unit
 gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
   'sudo systemctl disable --now continuous-sync 2>/dev/null || true; \
    sudo rm -f /etc/systemd/system/continuous-sync.service /usr/local/bin/continuous-sync.sh; \
    sudo systemctl daemon-reload || true'
 
-# New rsync script (runs once; timer triggers it every 5 minutes)
 read -r -d '' RSYNC_SCRIPT <<'EOF' || true
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -440,16 +450,9 @@ DEST_HOST="%IP2%"
 SRC_DIR="/data/"
 DEST_DIR="/data/"
 SSH_OPTS="-o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=/home/sync/.ssh/known_hosts -i /home/sync/.ssh/id_ed25519"
-
-# Gather local (name:size) for dummy files
 mapfile -t local_list < <(find "$SRC_DIR" -maxdepth 1 -type f -name "dummy-*.bin" -printf "%f:%s\n" | sort)
-
-# Sync (SSH provides encryption; no -z to avoid compressing zeros)
 rsync -a --delete -e "ssh $SSH_OPTS" "$SRC_DIR" "${DEST_USER}@${DEST_HOST}:${DEST_DIR}"
-
-# Confirm on vm-b: every local (name:size) must exist remotely
 remote_list="$(ssh $SSH_OPTS ${DEST_USER}@${DEST_HOST} 'find "'"$DEST_DIR"'" -maxdepth 1 -type f -name "dummy-*.bin" -printf "%f:%s\n" | sort')"
-
 ok=1
 for entry in "${local_list[@]}"; do
   if ! grep -qx "$entry" <<<"$remote_list"; then
@@ -457,7 +460,6 @@ for entry in "${local_list[@]}"; do
     ok=0
   fi
 done
-
 [[ $ok -eq 1 ]] && echo "SYNC_OK $(date -u +%FT%TZ) : ${#local_list[@]} files confirmed on ${DEST_HOST}"
 exit $(( ok ? 0 : 1 ))
 EOF
@@ -468,7 +470,6 @@ read -r -d '' RSYNC_SERVICE <<'EOF' || true
 Description=Rsync /data to peer and verify presence and size on peer
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=oneshot
 User=sync
@@ -478,7 +479,6 @@ NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=true
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -486,26 +486,21 @@ EOF
 read -r -d '' RSYNC_TIMER <<'EOF' || true
 [Unit]
 Description=Run rsync-to-peer every 5 minutes
-
 [Timer]
 OnBootSec=45
 OnUnitActiveSec=5min
 Unit=rsync-to-peer.service
-
 [Install]
 WantedBy=timers.target
 EOF
 
-# Install script + unit + timer
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "echo '${RSYNC_SCRIPT}' | sudo tee /usr/local/bin/rsync-to-peer.sh >/dev/null && sudo chmod 755 /usr/local/bin/rsync-to-peer.sh"
+remote_put "$VM1" /usr/local/bin/rsync-to-peer.sh 755 "$RSYNC_SCRIPT"
+remote_put "$VM1" /etc/systemd/system/rsync-to-peer.service 644 "$RSYNC_SERVICE"
+remote_put "$VM1" /etc/systemd/system/rsync-to-peer.timer   644 "$RSYNC_TIMER"
 
 gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "echo '${RSYNC_SERVICE}' | sudo tee /etc/systemd/system/rsync-to-peer.service >/dev/null; \
-   echo '${RSYNC_TIMER}'   | sudo tee /etc/systemd/system/rsync-to-peer.timer   >/dev/null; \
-   sudo systemctl daemon-reload; \
-   sudo systemctl enable --now rsync-to-peer.timer; \
-   systemctl list-timers --all | sed -n '1,8p'"
+  "sudo systemctl daemon-reload; sudo systemctl enable --now rsync-to-peer.timer; systemctl list-timers --all | sed -n '1,8p'"
+
 
 # ---- 8) Summary / Verification hints ------------------------------------------
 section "8) Summary & verification"
@@ -524,8 +519,8 @@ Run these to verify controls:
   gcloud compute routers nats describe ${NETWORK}-nat --router ${NETWORK}-router --region ${REGION} --project ${PROJECT_ID} | sed -n '1,80p'
 
   # On VM1:
-  #   sudo systemctl status continuous-sync
-  #   logger -p authpriv.info "audit-test"; sudo tail -n 50 /var/log/audit/audit.log
+    #   sudo systemctl status rsync-to-peer.service
+    #   journalctl -u rsync-to-peer --no-pager | tail -n 50
 
 Compliance notes (manual + policy):
  - Accept GDPR DP Addendum + HIPAA BAA (if applicable) in IAM & Admin > Legal & Compliance.
@@ -540,15 +535,10 @@ set -Eeuo pipefail
 DIR="/data"
 SIZE_MB=100
 MAX_BYTES=$((3*1024*1024*1024))
-
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 file="${DIR}/dummy-${ts}.bin"
-
-# Fast, deterministic 100MB to exercise encryption without compression
 dd if=/dev/zero of="$file" bs=1M count="${SIZE_MB}" status=none
 chown sync:sync "$file"
-
-# Rotate: delete oldest dummy-*.bin until under 3GB
 total="$(du -sb "$DIR" | cut -f1)"
 while (( total > MAX_BYTES )); do
   old="$(ls -1tr "$DIR"/dummy-*.bin 2>/dev/null | head -n 1 || true)"
@@ -563,7 +553,6 @@ read -r -d '' GEN_SERVICE <<'EOF' || true
 Description=Create 100MB dummy file in /data and rotate to 3GB
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=oneshot
 User=sync
@@ -573,7 +562,6 @@ NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=true
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -581,30 +569,29 @@ EOF
 read -r -d '' GEN_TIMER <<'EOF' || true
 [Unit]
 Description=Run generate-dummy every 2 minutes
-
 [Timer]
 OnBootSec=30
 OnUnitActiveSec=2min
 Unit=generate-dummy.service
-
 [Install]
 WantedBy=timers.target
 EOF
 
+remote_put "$VM1" /usr/local/bin/generate-dummy.sh 755 "$GEN_SCRIPT"
+remote_put "$VM1" /etc/systemd/system/generate-dummy.service 644 "$GEN_SERVICE"
+remote_put "$VM1" /etc/systemd/system/generate-dummy.timer   644 "$GEN_TIMER"
+
 gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "echo '${GEN_SCRIPT}'  | sudo tee /usr/local/bin/generate-dummy.sh >/dev/null && sudo chmod 755 /usr/local/bin/generate-dummy.sh; \
-   echo '${GEN_SERVICE}' | sudo tee /etc/systemd/system/generate-dummy.service >/dev/null; \
-   echo '${GEN_TIMER}'   | sudo tee /etc/systemd/system/generate-dummy.timer   >/dev/null; \
-   sudo systemctl daemon-reload; \
-   sudo systemctl enable --now generate-dummy.timer; \
-   systemctl list-timers --all | sed -n '1,12p'"
+  "sudo systemctl daemon-reload; sudo systemctl enable --now generate-dummy.timer; systemctl list-timers --all | sed -n '1,12p'"
+
 
 section "10) HTTPS API on vm-a (TLS with pinned CA) + vm-b fetcher"
 
-# --- Create CA, server cert (SAN = vm-a IP), and minimal HTTPS API on vm-a ---
+# Create CA/server certs only if missing
 gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
   "sudo install -d -m 700 /etc/ssl/vma; \
-   sudo bash -lc 'cat >/etc/ssl/vma/openssl.cnf <<EOF
+   if [[ ! -f /etc/ssl/vma/server.crt ]]; then \
+     sudo tee /etc/ssl/vma/openssl.cnf >/dev/null <<'CNF'
 [req]
 distinguished_name = dn
 req_extensions = req_ext
@@ -616,19 +603,19 @@ subjectAltName = @alt_names
 [alt_names]
 IP.1 = ${IP1}
 DNS.1 = vm-a
-EOF
-openssl genrsa -out /etc/ssl/vma/ca.key 4096
-openssl req -x509 -new -key /etc/ssl/vma/ca.key -sha256 -days 3650 -out /etc/ssl/vma/ca.crt -subj \"/CN=vm-a-internal-ca\"
-openssl genrsa -out /etc/ssl/vma/server.key 2048
-openssl req -new -key /etc/ssl/vma/server.key -out /etc/ssl/vma/server.csr -config /etc/ssl/vma/openssl.cnf
-openssl x509 -req -in /etc/ssl/vma/server.csr -CA /etc/ssl/vma/ca.crt -CAkey /etc/ssl/vma/ca.key -CAcreateserial -out /etc/ssl/vma/server.crt -days 825 -sha256 -extensions req_ext -extfile /etc/ssl/vma/openssl.cnf
-chmod 600 /etc/ssl/vma/*.key'"
+CNF
+     openssl genrsa -out /etc/ssl/vma/ca.key 4096; \
+     openssl req -x509 -new -key /etc/ssl/vma/ca.key -sha256 -days 3650 -out /etc/ssl/vma/ca.crt -subj \"/CN=vm-a-internal-ca\"; \
+     openssl genrsa -out /etc/ssl/vma/server.key 2048; \
+     openssl req -new -key /etc/ssl/vma/server.key -out /etc/ssl/vma/server.csr -config /etc/ssl/vma/openssl.cnf; \
+     openssl x509 -req -in /etc/ssl/vma/server.csr -CA /etc/ssl/vma/ca.crt -CAkey /etc/ssl/vma/ca.key -CAcreateserial \
+       -out /etc/ssl/vma/server.crt -days 825 -sha256 -extensions req_ext -extfile /etc/ssl/vma/openssl.cnf; \
+     chmod 600 /etc/ssl/vma/*.key; \
+   fi"
 
-# Simple HTTPS API: /health and /files (lists /data)
 read -r -d '' API_PY <<'PY' || true
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json, os, ssl
-
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
@@ -643,7 +630,6 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(files).encode())
         else:
             self.send_response(404); self.end_headers()
-
 if __name__=="__main__":
     httpd=HTTPServer(("0.0.0.0",8443),H)
     ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -657,7 +643,6 @@ read -r -d '' API_SVC <<'EOF' || true
 Description=Minimal HTTPS API on vm-a (TLS pinned CA)
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 User=sync
 Group=sync
@@ -668,26 +653,19 @@ NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
 PrivateTmp=true
-
 [Install]
 WantedBy=multi-user.target
 EOF
 
+remote_put "$VM1" /usr/local/bin/secure-api.py 755 "$API_PY"
+remote_put "$VM1" /etc/systemd/system/secure-api.service 644 "$API_SVC"
 gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "echo '${API_PY}'  | sudo tee /usr/local/bin/secure-api.py >/dev/null && sudo chmod 755 /usr/local/bin/secure-api.py; \
-   echo '${API_SVC}' | sudo tee /etc/systemd/system/secure-api.service >/dev/null; \
-   sudo systemctl daemon-reload; sudo systemctl enable --now secure-api; \
-   sleep 1; sudo ss -lntp | awk 'NR==1||/8443/'"
+  "sudo systemctl daemon-reload; sudo systemctl enable --now secure-api; sleep 1; sudo ss -lntp | awk 'NR==1||/8443/'"
 
-# --- Copy vm-a CA to vm-b and set up a fetcher that calls the API every 5m ---
+# Copy CA to vm-b and set fetcher
 CA_PEM="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command 'sudo cat /etc/ssl/vma/ca.crt')"
-
 gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo install -d -m 0755 /etc/ssl/localcerts; \
-   sudo tee /etc/ssl/localcerts/vm-a-ca.crt >/dev/null <<'PEM'
-${CA_PEM}
-PEM
-   sudo chmod 644 /etc/ssl/localcerts/vm-a-ca.crt"
+  "sudo install -d -m 0755 /etc/ssl/localcerts; printf '%s\n' '$CA_PEM' | sudo tee /etc/ssl/localcerts/vm-a-ca.crt >/dev/null; sudo chmod 644 /etc/ssl/localcerts/vm-a-ca.crt"
 
 read -r -d '' FETCH_SCRIPT <<'EOF' || true
 #!/usr/bin/env bash
@@ -705,11 +683,9 @@ read -r -d '' FETCH_SERVICE <<'EOF' || true
 Description=Poll vm-a HTTPS API with pinned CA
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/fetch-vma-api.sh
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -717,23 +693,21 @@ EOF
 read -r -d '' FETCH_TIMER <<'EOF' || true
 [Unit]
 Description=Fetch vm-a API every 5 minutes
-
 [Timer]
 OnBootSec=60
 OnUnitActiveSec=5min
 Unit=fetch-vma-api.service
-
 [Install]
 WantedBy=timers.target
 EOF
 
+remote_put "$VM2" /usr/local/bin/fetch-vma-api.sh 755 "$FETCH_SCRIPT"
+remote_put "$VM2" /etc/systemd/system/fetch-vma-api.service 644 "$FETCH_SERVICE"
+remote_put "$VM2" /etc/systemd/system/fetch-vma-api.timer   644 "$FETCH_TIMER"
+
 gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "echo '${FETCH_SCRIPT}'  | sudo tee /usr/local/bin/fetch-vma-api.sh >/dev/null && sudo chmod 755 /usr/local/bin/fetch-vma-api.sh; \
-   echo '${FETCH_SERVICE}' | sudo tee /etc/systemd/system/fetch-vma-api.service >/dev/null; \
-   echo '${FETCH_TIMER}'   | sudo tee /etc/systemd/system/fetch-vma-api.timer   >/dev/null; \
-   sudo systemctl daemon-reload; \
-   sudo systemctl enable --now fetch-vma-api.timer; \
-   systemctl list-timers --all | sed -n '1,12p'"
+  "sudo systemctl daemon-reload; sudo systemctl enable --now fetch-vma-api.timer; systemctl list-timers --all | sed -n '1,12p'"
+
 
 
 # ---------------------- Compliance Checker Callers -------------------------
@@ -776,28 +750,29 @@ export SSH_KEY
 
 
 section "Pre-HIPAA hardening: audit logs + retention+lock + Logging CMEK"
-# 1) Data Access logs (READ/WRITE) on allServices
 POL=$(mktemp); NEW=$(mktemp)
 gcloud projects get-iam-policy "$PROJECT_ID" --format=json > "$POL"
 
 jq '
   .auditConfigs = (
     ( .auditConfigs // [] ) as $ac
-    | # pull existing allServices config or create a blank one
-      ( [ $ac[]? | select(.service=="allServices") ][0] // {service:"allServices"} ) as $all
-    | # ensure DATA_READ and DATA_WRITE are present exactly once
-      $all |= (
-        .auditLogConfigs = (
-          ((.auditLogConfigs // []) + [{logType:"DATA_READ"},{logType:"DATA_WRITE"}])
-          | unique_by(.logType)
-        )
-      )
-    | # keep all other per-service configs as-is, then add back our allServices
-      [ $ac[]? | select(.service!="allServices") ] + [ $all ]
+    | [ $ac[]? | select(.service!="allServices") ]
+      + [
+          (
+            ( [ $ac[]? | select(.service=="allServices") ][0] // {service:"allServices"} )
+            | .auditLogConfigs = (
+                ((.auditLogConfigs // []) + [{logType:"DATA_READ"},{logType:"DATA_WRITE"}])
+                | unique_by(.logType)
+              )
+          )
+        ]
   )
 ' "$POL" > "$NEW"
 
 gcloud projects set-iam-policy "$PROJECT_ID" "$NEW" >/dev/null
+echo "Data Access logging (READ & WRITE) ensured for allServices."
+
+
 
 
 # 2) Logging bucket retention & lock (lock is irreversible)

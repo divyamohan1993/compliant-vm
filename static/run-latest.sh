@@ -10,4 +10,4 @@ wget -O autoconfig.sh --header="Cache-Control: no-cache" "${URL}?nocache=$(date 
 chmod 755 autoconfig.sh
 
 # VERBOSE=1 for xtrace; otherwise quiet
-VERBOSE="${VERBOSE:-0}" ./autoconfig.sh
+VERBOSE="${VERBOSE:-0}" PROJECT_ID="unified-icon-469918-s7" REGION="asia-south1" ZONE="asia-south1-a" ./autoconfig.sh
