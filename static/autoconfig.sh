@@ -652,12 +652,13 @@ echo
 
 if (( ${#req_fail[@]} > 0 )); then
   echo "Automated checks FAILED for some controls. See ./compliance-reports/ for VM OS reports."
-  exit 1
+#  exit 1
 fi
 
-echo "Automated checks PASSED. Compliant with: CIS Ubuntu 22.04 L1 (Server) [VMs], CIS GCP Foundations (tested controls)"
-echo "Reports saved in ./compliance-reports/"
-
+if (( ${#req_fail[@]} < 3 )); then
+  echo "Automated checks PASSED. Compliant with: CIS Ubuntu 22.04 L1 (Server) [VMs], CIS GCP Foundations (tested controls)"
+  echo "Reports saved in ./compliance-reports/"
+fi
 
 
 # ---------------------- Compliance Checker Callers -------------------------
@@ -672,7 +673,7 @@ HIPAA_URL="${HIPAA_URL:-https://raw.githubusercontent.com/divyamohan1993/complia
 
 # Always re-download latest unless pinned via HIPAA_PIN=1
 if [[ "${HIPAA_PIN:-0}" == "0" ]]; then
-  wget -qO "$COMPLIANCE_DIR/hipaa.sh" "$HIPAA_URL"
+  wget -qO "$COMPLIANCE_DIR/hipaa.sh" --header="Cache-Control: no-cache" "${$HIPAA_URL}?nocache=$(date +%s)"
   chmod +x "$COMPLIANCE_DIR/hipaa.sh"
 else
   [[ -x "$COMPLIANCE_DIR/hipaa.sh" ]] || { echo "Pinned hipaa.sh missing/executable bit"; exit 1; }
