@@ -852,3 +852,27 @@ fi
   --sa-email "$SA_EMAIL" \
   --vm "$VM1" --vm "$VM2" \
   --report-dir "./compliance-reports"
+
+# ---- ISO/IEC 27017 checker fetch & run ----------------------------------------
+section "Fetch & run ISO/IEC 27017 checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+ISO27017_URL="${ISO27017_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/iso27017.sh}"
+
+if [[ "${ISO27017_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/iso27017.sh" "$ISO27017_URL"
+  chmod +x "$COMPLIANCE_DIR/iso27017.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/iso27017.sh" ]] || { echo "Pinned iso27017.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/iso27017.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --subnet-range "$SUBNET_RANGE" \
+  --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
