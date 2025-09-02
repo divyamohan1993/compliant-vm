@@ -876,3 +876,26 @@ fi
   --sa-email "$SA_EMAIL" \
   --vm "$VM1" --vm "$VM2" \
   --report-dir "./compliance-reports"
+
+# ---- NIST SP 800-53 Rev. 5 checker fetch & run --------------------------------
+section "Fetch & run NIST SP 800-53 Rev.5 checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+NIST80053_URL="${NIST80053_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/nist80053.sh}"
+
+if [[ "${NIST80053_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/nist80053.sh" "$NIST80053_URL"
+  chmod +x "$COMPLIANCE_DIR/nist80053.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/nist80053.sh" ]] || { echo "Pinned nist80053.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/nist80053.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
