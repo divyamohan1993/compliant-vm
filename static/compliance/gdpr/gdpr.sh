@@ -185,9 +185,22 @@ check "No human users with roles/owner at project [Art. 25/32 least privilege]" 
 # ---- 3) Art. 33/34 — Breach notification readiness (signals) ------------------
 section "Art. 33/34 — Breach detection & notification (signals/evidence)"
 # We can’t prove your legal response, but we can check alerting exists.
-gcloud monitoring alert-policies list --format=json > /tmp/gdpr_alerts.json || true
+
+ALERTS_JSON="/tmp/gdpr_alerts.json"
+
+# Try GA, old GA alias, then beta/alpha; fall back to empty JSON if all fail.
+if ! (
+  gcloud monitoring policies list --format=json > "$ALERTS_JSON" 2>/dev/null \
+  || gcloud monitoring alert-policies list --format=json > "$ALERTS_JSON" 2>/dev/null \
+  || gcloud beta monitoring policies list --format=json > "$ALERTS_JSON" 2>/dev/null \
+  || gcloud alpha monitoring policies list --format=json > "$ALERTS_JSON" 2>/dev/null
+); then
+  echo "[]" > "$ALERTS_JSON"
+fi
+
 check "At least 1 Cloud Monitoring alert policy exists [Art. 33/34 operational readiness]" \
-  bash -lc 'jq -e "length>=1" /tmp/gdpr_alerts.json >/dev/null' || true
+  bash -lc 'jq -e "length>=1" '"$ALERTS_JSON"' >/dev/null' || true
+
 note "Document incident response & breach notification procedures (who/when/how) [Art. 33, 34]"
 
 # ---- 4) Art. 30 — Records of processing (organizational) ----------------------
