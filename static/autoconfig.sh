@@ -899,3 +899,26 @@ fi
   --sa-email "$SA_EMAIL" \
   --vm "$VM1" --vm "$VM2" \
   --report-dir "./compliance-reports"
+
+# ---- NIST CSF 2.0 checker fetch & run -----------------------------------------
+section "Fetch & run NIST CSF 2.0 checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+NIST_CSF_URL="${NIST_CSF_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/nistcsf.sh}"
+
+if [[ "${NIST_CSF_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/nistcsf.sh" "$NIST_CSF_URL"
+  chmod +x "$COMPLIANCE_DIR/nistcsf.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/nistcsf.sh" ]] || { echo "Pinned nistcsf.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/nistcsf.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
