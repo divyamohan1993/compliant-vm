@@ -657,3 +657,198 @@ fi
 
 echo "Automated checks PASSED. Compliant with: CIS Ubuntu 22.04 L1 (Server) [VMs], CIS GCP Foundations (tested controls)"
 echo "Reports saved in ./compliance-reports/"
+
+
+
+# ---------------------- Compliance Checker Callers -------------------------
+# ---- HIPAA checker fetch & run -------------------------------------------------
+section "Fetch & run HIPAA checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+# Pin to a specific version/branch/commit if you like:
+HIPAA_URL="${HIPAA_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/hipaa.sh}"
+
+# Always re-download latest unless pinned via HIPAA_PIN=1
+if [[ "${HIPAA_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/hipaa.sh" "$HIPAA_URL"
+  chmod +x "$COMPLIANCE_DIR/hipaa.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/hipaa.sh" ]] || { echo "Pinned hipaa.sh missing/executable bit"; exit 1; }
+fi
+
+# Run read-only compliance (safe to call every autoconfig.sh run)
+"$COMPLIANCE_DIR/hipaa.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
+
+# If you want the autoconfig to fail pipeline on HIPAA fails, just forward exit code.
+
+# ---- GDPR checker fetch & run --------------------------------------------------
+section "Fetch & run GDPR checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+GDPR_URL="${GDPR_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/gdpr.sh}"
+
+if [[ "${GDPR_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/gdpr.sh" "$GDPR_URL"
+  chmod +x "$COMPLIANCE_DIR/gdpr.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/gdpr.sh" ]] || { echo "Pinned gdpr.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/gdpr.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
+
+# ---- DPDPR checker fetch & run -------------------------------------------------
+section "Fetch & run DPDPR checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+DPDPR_URL="${DPDPR_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/dpdpr.sh}"
+
+# Always refresh unless pinned
+if [[ "${DPDPR_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/dpdpr.sh" "$DPDPR_URL"
+  chmod +x "$COMPLIANCE_DIR/dpdpr.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/dpdpr.sh" ]] || { echo "Pinned dpdpr.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/dpdpr.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
+
+# ---- PCI DSS L1 checker fetch & run -------------------------------------------
+section "Fetch & run PCI DSS v4.0.1 Level 1 checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+PCIDSS_URL="${PCIDSS_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/pcidss-l1.sh}"
+
+# Always refresh unless pinned for reproducibility
+if [[ "${PCIDSS_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/pcidss-l1.sh" "$PCIDSS_URL"
+  chmod +x "$COMPLIANCE_DIR/pcidss-l1.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/pcidss-l1.sh" ]] || { echo "Pinned pcidss-l1.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/pcidss-l1.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
+
+# ---- SOX ICFR checker fetch & run ---------------------------------------------
+section "Fetch & run SOX §404 ICFR (ITGC) checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+SOX_URL="${SOX_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/sox.sh}"
+
+if [[ "${SOX_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/sox.sh" "$SOX_URL"
+  chmod +x "$COMPLIANCE_DIR/sox.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/sox.sh" ]] || { echo "Pinned sox.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/sox.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
+
+# ---- GLBA / FTC Safeguards Rule checker fetch & run ---------------------------
+section "Fetch & run GLBA (FTC Safeguards Rule) checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+GLBA_URL="${GLBA_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/glba.sh}"
+
+# Always refresh unless pinned
+if [[ "${GLBA_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/glba.sh" "$GLBA_URL"
+  chmod +x "$COMPLIANCE_DIR/glba.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/glba.sh" ]] || { echo "Pinned glba.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/glba.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
+
+# ---- SOC 2 checker fetch & run -------------------------------------------------
+section "Fetch & run SOC 2 checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+SOC2_URL="${SOC2_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/soc2.sh}"
+
+if [[ "${SOC2_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/soc2.sh" "$SOC2_URL"
+  chmod +x "$COMPLIANCE_DIR/soc2.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/soc2.sh" ]] || { echo "Pinned soc2.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/soc2.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
+
+# ---- ISO/IEC 27001:2022 checker fetch & run -----------------------------------
+section "Fetch & run ISO/IEC 27001:2022 checker (modular)"
+
+COMPLIANCE_DIR="${COMPLIANCE_DIR:-./compliance}"
+mkdir -p "$COMPLIANCE_DIR"
+
+ISO27001_URL="${ISO27001_URL:-https://raw.githubusercontent.com/<your-org>/<your-repo>/main/compliance/iso27001.sh}"
+
+if [[ "${ISO27001_PIN:-0}" == "0" ]]; then
+  wget -qO "$COMPLIANCE_DIR/iso27001.sh" "$ISO27001_URL"
+  chmod +x "$COMPLIANCE_DIR/iso27001.sh"
+else
+  [[ -x "$COMPLIANCE_DIR/iso27001.sh" ]] || { echo "Pinned iso27001.sh missing/executable bit"; exit 1; }
+fi
+
+"$COMPLIANCE_DIR/iso27001.sh" \
+  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+  --sa-email "$SA_EMAIL" \
+  --vm "$VM1" --vm "$VM2" \
+  --report-dir "./compliance-reports"
