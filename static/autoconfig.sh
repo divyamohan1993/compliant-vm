@@ -589,9 +589,12 @@ section "10) HTTPS API on vm-a (TLS with pinned CA) + vm-b fetcher"
 
 # Create CA/server certs only if missing
 gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo install -d -m 700 /etc/ssl/vma; \
-   if [[ ! -f /etc/ssl/vma/server.crt ]]; then \
-     sudo tee /etc/ssl/vma/openssl.cnf >/dev/null <<'CNF'
+  "sudo bash -lc '
+set -Eeuo pipefail
+# dir readable by group sync so the service user can traverse it
+install -d -m 750 -o root -g sync /etc/ssl/vma
+if [[ ! -f /etc/ssl/vma/server.crt ]]; then
+  cat >/etc/ssl/vma/openssl.cnf <<CNF
 [req]
 distinguished_name = dn
 req_extensions = req_ext
@@ -604,14 +607,27 @@ subjectAltName = @alt_names
 IP.1 = ${IP1}
 DNS.1 = vm-a
 CNF
-     openssl genrsa -out /etc/ssl/vma/ca.key 4096; \
-     openssl req -x509 -new -key /etc/ssl/vma/ca.key -sha256 -days 3650 -out /etc/ssl/vma/ca.crt -subj \"/CN=vm-a-internal-ca\"; \
-     openssl genrsa -out /etc/ssl/vma/server.key 2048; \
-     openssl req -new -key /etc/ssl/vma/server.key -out /etc/ssl/vma/server.csr -config /etc/ssl/vma/openssl.cnf; \
-     openssl x509 -req -in /etc/ssl/vma/server.csr -CA /etc/ssl/vma/ca.crt -CAkey /etc/ssl/vma/ca.key -CAcreateserial \
-       -out /etc/ssl/vma/server.crt -days 825 -sha256 -extensions req_ext -extfile /etc/ssl/vma/openssl.cnf; \
-     chmod 600 /etc/ssl/vma/*.key; \
-   fi"
+
+  # CA (root-only)
+  openssl genrsa -out /etc/ssl/vma/ca.key 4096
+  openssl req -x509 -new -key /etc/ssl/vma/ca.key -sha256 -days 3650 \
+    -out /etc/ssl/vma/ca.crt -subj \"/CN=vm-a-internal-ca\"
+
+  # server cert used by the sync user service
+  openssl genrsa -out /etc/ssl/vma/server.key 2048
+  openssl req -new -key /etc/ssl/vma/server.key \
+    -out /etc/ssl/vma/server.csr -config /etc/ssl/vma/openssl.cnf
+  openssl x509 -req -in /etc/ssl/vma/server.csr -CA /etc/ssl/vma/ca.crt -CAkey /etc/ssl/vma/ca.key -CAcreateserial \
+    -out /etc/ssl/vma/server.crt -days 825 -sha256 -extensions req_ext -extfile /etc/ssl/vma/openssl.cnf
+
+  # permissions: CA key root-only; server key readable by group sync
+  chown root:root /etc/ssl/vma/ca.key
+  chmod 600 /etc/ssl/vma/ca.key
+  chown root:sync /etc/ssl/vma/server.key
+  chmod 640 /etc/ssl/vma/server.key
+  chmod 644 /etc/ssl/vma/*.crt
+fi
+'"
 
 read -r -d '' API_PY <<'PY' || true
 from http.server import HTTPServer, BaseHTTPRequestHandler
