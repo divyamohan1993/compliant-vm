@@ -413,7 +413,7 @@ gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@
 PUBKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "sudo -u sync bash -lc 'cat /home/sync/.ssh/id_ed25519.pub'")"
 
 # Create known_hosts on VM1 for IP2 (host key pin)
-HOSTKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "ssh-keyscan -t ed25519 $IP2" 2>/dev/null || true)"
+HOSTKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "ssh-keyscan -T 5 -t rsa,ecdsa,ed25519 $IP2" 2>/dev/null || true)"
 if [[ -n "$HOSTKEY" ]]; then
   gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
     "sudo -u sync bash -lc 'H=/home/sync; install -d -m 700 -o sync -g sync \$H/.ssh; grep -q \"${IP2}\" \$H/.ssh/known_hosts 2>/dev/null || echo \"$HOSTKEY\" >> \$H/.ssh/known_hosts; chmod 600 \$H/.ssh/known_hosts'"
@@ -433,6 +433,7 @@ DEST_HOST="${IP2}"
 SRC_DIR="/data/"
 DEST_DIR="/data/"
 SSH_OPTS="-o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -i /home/sync/.ssh/id_ed25519"
+SSH_OPTS="$SSH_OPTS -o UserKnownHostsFile=/home/sync/.ssh/known_hosts"
 rsync -az --delete -e "ssh \$SSH_OPTS" "\$SRC_DIR" "\${DEST_USER}@\${DEST_HOST}:\${DEST_DIR}"
 inotifywait -m -r -e modify,create,delete,move "\$SRC_DIR" | while read -r _; do
   rsync -az --delete -e "ssh \$SSH_OPTS" "\$SRC_DIR" "\${DEST_USER}@\${DEST_HOST}:\${DEST_DIR}"
@@ -453,12 +454,14 @@ Restart=always
 RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=full
-ProtectHome=true
+ProtectHome=read-only
 PrivateTmp=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 MemoryDenyWriteExecute=true
 LockPersonality=true
+Environment=HOME=/home/sync
+WorkingDirectory=/home/sync
 
 [Install]
 WantedBy=multi-user.target
@@ -540,15 +543,26 @@ section "Pre-HIPAA hardening: audit logs + retention+lock + Logging CMEK"
 # 1) Data Access logs (READ/WRITE) on allServices
 POL=$(mktemp); NEW=$(mktemp)
 gcloud projects get-iam-policy "$PROJECT_ID" --format=json > "$POL"
-jq '(.auditConfigs //= []) as $ac
-  | ($ac | map(select(.service!="allServices"))) as $others
-  | ($ac | map(select(.service=="allServices") | .auditLogConfigs[]?)) as $existing
-  | .auditConfigs = ($others + [
-      { service:"allServices",
-        auditLogConfigs: ( ($existing + [{logType:"DATA_READ"},{logType:"DATA_WRITE"}]) | unique_by(.logType) )
-      }
-    ])' "$POL" > "$NEW"
+
+jq '
+  .auditConfigs = (
+    ( .auditConfigs // [] ) as $ac
+    | # pull existing allServices config or create a blank one
+      ( [ $ac[]? | select(.service=="allServices") ][0] // {service:"allServices"} ) as $all
+    | # ensure DATA_READ and DATA_WRITE are present exactly once
+      $all |= (
+        .auditLogConfigs = (
+          ((.auditLogConfigs // []) + [{logType:"DATA_READ"},{logType:"DATA_WRITE"}])
+          | unique_by(.logType)
+        )
+      )
+    | # keep all other per-service configs as-is, then add back our allServices
+      [ $ac[]? | select(.service!="allServices") ] + [ $all ]
+  )
+' "$POL" > "$NEW"
+
 gcloud projects set-iam-policy "$PROJECT_ID" "$NEW" >/dev/null
+
 
 # 2) Logging bucket retention & lock (lock is irreversible)
 gcloud logging buckets update _Default --location=global --retention-days=2190 || true
