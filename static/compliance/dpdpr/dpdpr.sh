@@ -151,7 +151,15 @@ if ! (
   echo "[]" > "$ALERTS_JSON"
 fi
 
-gcloud monitoring channels list --format=json > /tmp/dpdp_channels.json || echo "[]" > /tmp/dpdp_channels.json
+# Channels: prefer GA; fallback to beta/alpha so older gclouds don't break
+if ! (
+  gcloud monitoring channels list --format=json > /tmp/dpdp_channels.json 2>/dev/null \
+  || gcloud beta  monitoring channels list --format=json > /tmp/dpdp_channels.json 2>/dev/null \
+  || gcloud alpha monitoring channels list --format=json > /tmp/dpdp_channels.json 2>/dev/null
+); then
+  echo "[]" > /tmp/dpdp_channels.json
+fi
+
 
 check "At least 1 Monitoring alert policy exists" bash -lc 'jq -e "length>=1" '"$ALERTS_JSON"' >/dev/null'
 check "At least 1 Notification channel exists"   bash -lc 'jq -e "length>=1" /tmp/dpdp_channels.json >/dev/null'
@@ -224,6 +232,11 @@ EOS
 if ((${#VMS[@]})); then
   for inst in "${VMS[@]}"; do
     set +e
+    # Refresh OS Login key TTL if a key was provided (prevents occasional SSH rc=1)
+    if [[ -n "$SSH_KEY" && -f "$SSH_KEY.pub" ]]; then
+      gcloud compute os-login ssh-keys add --project "$PROJECT_ID" --key-file="$SSH_KEY.pub" --ttl=24h || true
+    fi
+
     out="$(gcloud compute ssh "$inst" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE" 2>/dev/null)"
     rc=$?
     set -e

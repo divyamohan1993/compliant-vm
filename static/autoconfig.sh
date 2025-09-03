@@ -190,6 +190,8 @@ if [[ -z "$OS_LOGIN_USER" ]]; then
     --format='value(posixAccounts[0].username)')"
 fi
 
+export OS_LOGIN_USER
+
 # Use IAP + pinned key + correct Linux user for all SSH calls in this script
 SSH_COMMON=(--tunnel-through-iap --ssh-key-file="$SSH_KEY" --ssh-flag="-l ${OS_LOGIN_USER}")
 
