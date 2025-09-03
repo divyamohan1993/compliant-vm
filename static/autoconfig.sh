@@ -81,13 +81,13 @@ iam_bind_if_missing() { # iam_bind_if_missing <member> <role> (project)
   rm -f "$tmp"
 }
 
-# ---- 0) Enable required APIs ---------------------------------------------------
-section "0) Enabling APIs (idempotent)"
-for svc in compute.googleapis.com iam.googleapis.com cloudkms.googleapis.com \
-           oslogin.googleapis.com osconfig.googleapis.com iap.googleapis.com \
-           logging.googleapis.com monitoring.googleapis.com; do
-  enable_api "$svc"
-done
+# # ---- 0) Enable required APIs ---------------------------------------------------
+# section "0) Enabling APIs (idempotent)"
+# for svc in compute.googleapis.com iam.googleapis.com cloudkms.googleapis.com \
+#            oslogin.googleapis.com osconfig.googleapis.com iap.googleapis.com \
+#            logging.googleapis.com monitoring.googleapis.com; do
+#   enable_api "$svc"
+# done
 
 # ---- 1) Network / Subnet / Firewalls ------------------------------------------
 section "1) Network & Firewall (no public exposure + IAP SSH)"

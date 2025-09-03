@@ -217,14 +217,17 @@ read -r -d '' REMOTE <<"EOS" || true
 set -Eeuo pipefail
 echo "HOST=$(hostname)"
 state_auditd="$(systemctl is-active auditd || true)"; echo "AUDITD=$state_auditd"
-rules_cnt="$(auditctl -l 2>/dev/null | wc -l || true)"; echo "AUDIT_RULES=$rules_cnt"
+rules_cnt="$( (auditctl -l 2>/dev/null || true) | wc -l )"; echo "AUDIT_RULES=$rules_cnt"
 ops_state="$(systemctl is-active google-cloud-ops-agent 2>/dev/null || true)"; echo "OPS_AGENT=$ops_state"
 aide_ver="$(dpkg -s aide 2>/dev/null | awk -F': ' '/Version/{print $2}' || true)"; echo "AIDE_VER=${aide_ver:-none}"
 aide_db="$(ls -1 /var/lib/aide/aide.db* 2>/dev/null | head -n1 || true)"; echo "AIDE_DB=${aide_db:-none}"
-sshpw="$(sshd -T 2>/dev/null | awk '/^passwordauthentication/{print $2}' || true)"; echo "SSH_PASSAUTH=${sshpw:-unknown}"
-sshroot="$(sshd -T 2>/dev/null | awk '/^permitrootlogin/{print $2}' || true)"; echo "SSH_ROOTLOGIN=${sshroot:-unknown}"
+sshpw="$( (sshd -T 2>/dev/null || true) | awk '/^passwordauthentication/{print $2}' || true )"
+echo "SSH_PASSAUTH=${sshpw:-unknown}"
+sshroot="$( (sshd -T 2>/dev/null || true) | awk '/^permitrootlogin/{print $2}' || true )"
+echo "SSH_ROOTLOGIN=${sshroot:-unknown}"
 ua_pkg="$(dpkg -s unattended-upgrades 2>/dev/null | awk -F': ' '/Status/{print $2}' || true)"; echo "UNATT_UPGR=${ua_pkg:-none}"
-ua_on="$(grep -hoE 'APT::Periodic::Unattended-Upgrade\\s+\"?1\"?' /etc/apt/apt.conf.d/* 2>/dev/null | wc -l)"; echo "UNATT_ENABLED=$ua_on"
+ua_on="$( (grep -hoE 'APT::Periodic::Unattended-Upgrade\\s+\"?1\"?' /etc/apt/apt.conf.d/* 2>/dev/null || true) | wc -l )"
+echo "UNATT_ENABLED=$ua_on"
 ntp="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo no)"; echo "NTP_SYNC=$ntp"
 tmout="$(grep -RhsE '^\s*TMOUT=([3-9][0-9]{2,}|[1-9][0-9]{3,})' /etc/profile /etc/profile.d/* 2>/dev/null | wc -l)"; echo "TMOUT_SET=$tmout"
 EOS
@@ -234,7 +237,7 @@ if ((${#VMS[@]})); then
     set +e
     # Refresh OS Login key TTL if a key was provided (prevents occasional SSH rc=1)
     if [[ -n "$SSH_KEY" && -f "$SSH_KEY.pub" ]]; then
-      gcloud compute os-login ssh-keys add --project "$PROJECT_ID" --key-file="$SSH_KEY.pub" --ttl=24h || true
+      gcloud compute os-login ssh-keys add --project "$PROJECT_ID" --key-file="$SSH_KEY.pub" --ttl=24h >/dev/null 2>&1 || true
     fi
 
     out="$(gcloud compute ssh "$inst" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE" 2>/dev/null)"
