@@ -214,6 +214,7 @@ fi
 # ---- VM OS probes (auth/integrity/telemetry) ----------------------------------
 section "Host probes (auth/integrity/telemetry)"
 read -r -d '' REMOTE <<"EOS" || true
+trap 'echo "[remote] rc=$? line=$LINENO cmd: $BASH_COMMAND" >&2' ERR
 set -Eeuo pipefail
 echo "HOST=$(hostname)"
 state_auditd="$(systemctl is-active auditd || true)"; echo "AUDITD=$state_auditd"
@@ -229,7 +230,8 @@ ua_pkg="$(dpkg -s unattended-upgrades 2>/dev/null | awk -F': ' '/Status/{print $
 ua_on="$( (grep -hoE 'APT::Periodic::Unattended-Upgrade\\s+\"?1\"?' /etc/apt/apt.conf.d/* 2>/dev/null || true) | wc -l )"
 echo "UNATT_ENABLED=$ua_on"
 ntp="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo no)"; echo "NTP_SYNC=$ntp"
-tmout="$(grep -RhsE '^\s*TMOUT=([3-9][0-9]{2,}|[1-9][0-9]{3,})' /etc/profile /etc/profile.d/* 2>/dev/null | wc -l)"; echo "TMOUT_SET=$tmout"
+tmout="$( (grep -RhsE '^\s*TMOUT=([3-9][0-9]{2,}|[1-9][0-9]{3,})' /etc/profile /etc/profile.d/* 2>/dev/null || true) | wc -l )"
+echo "TMOUT_SET=$tmout"
 EOS
 
 if ((${#VMS[@]})); then
