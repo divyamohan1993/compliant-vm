@@ -736,6 +736,7 @@ enable_api logging.googleapis.com
 enable_api cloudkms.googleapis.com
 enable_api iam.googleapis.com
 
+
 section "Pre-HIPAA: ensure OS Login + IAP SSH prerequisites"
 
 ACCOUNT="$(gcloud config get-value account)"
@@ -875,7 +876,6 @@ for inst in "$VM1" "$VM2"; do
 done
 
 
-
 # ---- HIPAA checker fetch & run -------------------------------------------------
 section "Fetch & run HIPAA checker (modular)"
 
@@ -901,6 +901,84 @@ run_checker "HIPAA" "$COMPLIANCE_DIR/hipaa.sh" \
 
 
 # If you want the autoconfig to fail pipeline on HIPAA fails, just forward exit code.
+
+
+# ---- Monitoring baseline (alert channel + minimal policy) ---------------------
+section "Pre GDPR / DPDPR failsafe checking - Monitoring baseline (notification channel + minimal alert)"
+
+# Use the currently-authenticated account unless overridden: ALERT_EMAIL=you@org
+ACCOUNT="$(gcloud config get-value account)"
+ALERT_EMAIL="${ALERT_EMAIL:-$ACCOUNT}"
+
+CHAN_NAME="Security Alerts (email)"
+# Find existing channel (alpha is widely available in Cloud Shell; try GA/beta as well)
+CHAN_ID="$(
+  gcloud monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+  || gcloud beta  monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+  || gcloud alpha monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+  || true
+)"
+
+if [[ -z "$CHAN_ID" ]]; then
+  # Create an email channel (try GA -> beta -> alpha)
+  if ! gcloud monitoring channels create \
+        --display-name="$CHAN_NAME" --type=email \
+        --channel-labels="email_address=${ALERT_EMAIL}" 2>/dev/null; then
+    if ! gcloud beta monitoring channels create \
+          --display-name="$CHAN_NAME" --type=email \
+          --channel-labels="email_address=${ALERT_EMAIL}" 2>/dev/null; then
+      gcloud alpha monitoring channels create \
+        --display-name="$CHAN_NAME" --type=email \
+        --channel-labels="email_address=${ALERT_EMAIL}"
+    fi
+  fi
+  CHAN_ID="$(
+    gcloud monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+    || gcloud beta  monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+    || gcloud alpha monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+    || true
+  )"
+fi
+
+POL_NAME="High CPU on any VM"
+POL_ID="$(gcloud monitoring policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null || true)"
+
+if [[ -z "$POL_ID" ]]; then
+  TMP=/tmp/high-cpu-policy.json
+  cat > "$TMP" <<'JSON'
+{
+  "displayName": "High CPU on any VM",
+  "combiner": "OR",
+  "documentation": {"content": "Autocreated to satisfy alerting readiness."},
+  "conditions": [{
+    "displayName": "CPU > 90% for 5m",
+    "conditionThreshold": {
+      "filter": "metric.type=\"compute.googleapis.com/instance/cpu/utilization\" resource.type=\"gce_instance\"",
+      "aggregations": [{
+        "alignmentPeriod": "300s",
+        "perSeriesAligner": "ALIGN_MEAN",
+        "crossSeriesReducer": "REDUCE_NONE"
+      }],
+      "comparison": "COMPARISON_GT",
+      "thresholdValue": 0.9,
+      "duration": "300s",
+      "trigger": {"count": 1}
+    }
+  }],
+  "notificationChannels": []
+}
+JSON
+  # Attach channel if we have one
+  if [[ -n "$CHAN_ID" ]]; then
+    jq --arg ch "$CHAN_ID" '.notificationChannels=[ $ch ]' "$TMP" > "${TMP}.new" && mv "${TMP}.new" "$TMP"
+  fi
+  # Create the policy (try GA -> beta -> alpha)
+  gcloud monitoring policies create --policy-from-file="$TMP" \
+  || gcloud beta  monitoring policies create --policy-from-file="$TMP" \
+  || gcloud alpha monitoring policies create --policy-from-file="$TMP"
+fi
+
+
 
 # ---- GDPR checker fetch & run --------------------------------------------------
 section "Fetch & run GDPR checker (modular)"
