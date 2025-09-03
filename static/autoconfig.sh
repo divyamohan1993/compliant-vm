@@ -229,502 +229,502 @@ fi
 
 BOOT_KMS="projects/${PROJECT_ID}/locations/${KEY_LOC}/keyRings/${KEYRING}/cryptoKeys/${KEY}"
 
-# ---- 3) Service Account + IAM (with eventual-consistency retry) ---------------
-section "3) Service Account & IAM"
-if ! exists_sa; then
-  gcloud iam service-accounts create "$SA_NAME" --project "$PROJECT_ID"
-  # wait until SA actually visible
-  retry 10 2 exists_sa
-else
-  log "Service account $SA_EMAIL exists - skipping create"
-fi
+# # ---- 3) Service Account + IAM (with eventual-consistency retry) ---------------
+# section "3) Service Account & IAM"
+# if ! exists_sa; then
+#   gcloud iam service-accounts create "$SA_NAME" --project "$PROJECT_ID"
+#   # wait until SA actually visible
+#   retry 10 2 exists_sa
+# else
+#   log "Service account $SA_EMAIL exists - skipping create"
+# fi
 
-# Bind minimal roles (idempotent)
-iam_bind_if_missing "serviceAccount:${SA_EMAIL}" "roles/logging.logWriter"
-iam_bind_if_missing "serviceAccount:${SA_EMAIL}" "roles/monitoring.metricWriter"
+# # Bind minimal roles (idempotent)
+# iam_bind_if_missing "serviceAccount:${SA_EMAIL}" "roles/logging.logWriter"
+# iam_bind_if_missing "serviceAccount:${SA_EMAIL}" "roles/monitoring.metricWriter"
 
-# Allow SA to use the CMEK
-if ! gcloud kms keys get-iam-policy "$KEY" --keyring "$KEYRING" --location "$KEY_LOC" --project "$PROJECT_ID" \
-  --format=json | jq -e --arg m "serviceAccount:${SA_EMAIL}" '.bindings[]? | select(.role=="roles/cloudkms.cryptoKeyEncrypterDecrypter") | .members[]? | select(.==$m)' >/dev/null; then
-  gcloud kms keys add-iam-policy-binding "$KEY" \
-    --location "$KEY_LOC" --keyring "$KEYRING" \
-    --member="serviceAccount:${SA_EMAIL}" \
-    --role="roles/cloudkms.cryptoKeyEncrypterDecrypter" --project "$PROJECT_ID"
-else
-  log "CMEK binding exists for $SA_EMAIL - skipping"
-fi
+# # Allow SA to use the CMEK
+# if ! gcloud kms keys get-iam-policy "$KEY" --keyring "$KEYRING" --location "$KEY_LOC" --project "$PROJECT_ID" \
+#   --format=json | jq -e --arg m "serviceAccount:${SA_EMAIL}" '.bindings[]? | select(.role=="roles/cloudkms.cryptoKeyEncrypterDecrypter") | .members[]? | select(.==$m)' >/dev/null; then
+#   gcloud kms keys add-iam-policy-binding "$KEY" \
+#     --location "$KEY_LOC" --keyring "$KEYRING" \
+#     --member="serviceAccount:${SA_EMAIL}" \
+#     --role="roles/cloudkms.cryptoKeyEncrypterDecrypter" --project "$PROJECT_ID"
+# else
+#   log "CMEK binding exists for $SA_EMAIL - skipping"
+# fi
 
-# Also allow the Compute Engine **Service Agent** to use the CMEK (required for boot-disk CMEK).
-PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-CE_AGENT="service-${PROJECT_NUMBER}@compute-system.iam.gserviceaccount.com"
+# # Also allow the Compute Engine **Service Agent** to use the CMEK (required for boot-disk CMEK).
+# PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+# CE_AGENT="service-${PROJECT_NUMBER}@compute-system.iam.gserviceaccount.com"
 
-if ! gcloud kms keys get-iam-policy "$KEY" --keyring "$KEYRING" --location "$KEY_LOC" --project "$PROJECT_ID" \
-  --format=json | jq -e --arg m "serviceAccount:${CE_AGENT}" \
-  '.bindings[]? | select(.role=="roles/cloudkms.cryptoKeyEncrypterDecrypter") | .members[]? | select(.==$m)' >/dev/null; then
-  gcloud kms keys add-iam-policy-binding "$KEY" \
-    --location "$KEY_LOC" --keyring "$KEYRING" \
-    --member="serviceAccount:${CE_AGENT}" \
-    --role="roles/cloudkms.cryptoKeyEncrypterDecrypter" \
-    --project "$PROJECT_ID"
-else
-  log "CMEK binding exists for Compute Engine service agent - skipping"
-fi
+# if ! gcloud kms keys get-iam-policy "$KEY" --keyring "$KEYRING" --location "$KEY_LOC" --project "$PROJECT_ID" \
+#   --format=json | jq -e --arg m "serviceAccount:${CE_AGENT}" \
+#   '.bindings[]? | select(.role=="roles/cloudkms.cryptoKeyEncrypterDecrypter") | .members[]? | select(.==$m)' >/dev/null; then
+#   gcloud kms keys add-iam-policy-binding "$KEY" \
+#     --location "$KEY_LOC" --keyring "$KEYRING" \
+#     --member="serviceAccount:${CE_AGENT}" \
+#     --role="roles/cloudkms.cryptoKeyEncrypterDecrypter" \
+#     --project "$PROJECT_ID"
+# else
+#   log "CMEK binding exists for Compute Engine service agent - skipping"
+# fi
 
-# ---- 4) Shielded VMs (no public IPs) ------------------------------------------
-section "4) Compute instances"
-COMMON_FLAGS=(--project "$PROJECT_ID" --zone "$ZONE" --no-address \
-  --machine-type "$MACHINE" --network "$NETWORK" --subnet "$SUBNET" \
-  --service-account "$SA_EMAIL" --scopes "https://www.googleapis.com/auth/cloud-platform" \
-  --image-family "$IMG_FAMILY" --image-project "$IMG_PROJECT" \
-  --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
-  --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE,serial-port-enable=FALSE \
-  --boot-disk-kms-key "$BOOT_KMS" --boot-disk-size "20GB" \
-  --tags "sync")
-
-
-if ! exists_vm "$VM1"; then
-  gcloud compute instances create "$VM1" "${COMMON_FLAGS[@]}"
-else
-  log "VM $VM1 exists - skipping"
-fi
-if ! exists_vm "$VM2"; then
-  gcloud compute instances create "$VM2" "${COMMON_FLAGS[@]}"
-else
-  log "VM $VM2 exists - skipping"
-fi
-
-IP1="$(gcloud compute instances describe "$VM1" --zone "$ZONE" --format='get(networkInterfaces[0].networkIP)' --project "$PROJECT_ID")"
-IP2="$(gcloud compute instances describe "$VM2" --zone "$ZONE" --format='get(networkInterfaces[0].networkIP)' --project "$PROJECT_ID")"
-log "$VM1 @ $IP1"
-log "$VM2 @ $IP2"
-
-# Enforce OS Login + block project keys on instances now that they exist
-# (covers first-run create and any older instances missing these bits)
-for inst in "$VM1" "$VM2"; do
-  gcloud compute instances add-metadata "$inst" --zone "$ZONE" --project "$PROJECT_ID" \
-    --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE || true
-done
-
-# Refresh OS Login key TTL again right before SSH phases (belt-and-suspenders)
-gcloud compute os-login ssh-keys add --project "$PROJECT_ID" \
-  --key-file="$SSH_KEY.pub" --ttl=24h || true
+# # ---- 4) Shielded VMs (no public IPs) ------------------------------------------
+# section "4) Compute instances"
+# COMMON_FLAGS=(--project "$PROJECT_ID" --zone "$ZONE" --no-address \
+#   --machine-type "$MACHINE" --network "$NETWORK" --subnet "$SUBNET" \
+#   --service-account "$SA_EMAIL" --scopes "https://www.googleapis.com/auth/cloud-platform" \
+#   --image-family "$IMG_FAMILY" --image-project "$IMG_PROJECT" \
+#   --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring \
+#   --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE,serial-port-enable=FALSE \
+#   --boot-disk-kms-key "$BOOT_KMS" --boot-disk-size "20GB" \
+#   --tags "sync")
 
 
-# ---- 5) Bootstrap packages / audit on both VMs --------------------------------
-section "5) Bootstrap auditd + Ops Agent + rsync + inotify"
-read -r -d '' REMOTE_BOOTSTRAP <<'EOF' || true
-set -Eeuo pipefail
+# if ! exists_vm "$VM1"; then
+#   gcloud compute instances create "$VM1" "${COMMON_FLAGS[@]}"
+# else
+#   log "VM $VM1 exists - skipping"
+# fi
+# if ! exists_vm "$VM2"; then
+#   gcloud compute instances create "$VM2" "${COMMON_FLAGS[@]}"
+# else
+#   log "VM $VM2 exists - skipping"
+# fi
 
-# Non-interactive apt to avoid debconf prompts
-export DEBIAN_FRONTEND=noninteractive
+# IP1="$(gcloud compute instances describe "$VM1" --zone "$ZONE" --format='get(networkInterfaces[0].networkIP)' --project "$PROJECT_ID")"
+# IP2="$(gcloud compute instances describe "$VM2" --zone "$ZONE" --format='get(networkInterfaces[0].networkIP)' --project "$PROJECT_ID")"
+# log "$VM1 @ $IP1"
+# log "$VM2 @ $IP2"
 
-# Make apt resilient + IPv4-only (avoids IPv6 reachability issues)
-sudo mkdir -p /etc/apt/apt.conf.d
-echo 'Acquire::ForceIPv4 "true"; Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
+# # Enforce OS Login + block project keys on instances now that they exist
+# # (covers first-run create and any older instances missing these bits)
+# for inst in "$VM1" "$VM2"; do
+#   gcloud compute instances add-metadata "$inst" --zone "$ZONE" --project "$PROJECT_ID" \
+#     --metadata enable-oslogin=TRUE,block-project-ssh-keys=TRUE || true
+# done
 
-# Update with retries
-for i in {1..5}; do
-  if sudo apt-get update -y; then break; fi
-  sleep 5
-done
-
-# Add Ops Agent repo (idempotent, correct key source) + resilient fallback
-sudo install -d -m 0755 /usr/share/keyrings
-# Correct URL and non-interactive dearmor
-curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-  | sudo gpg --dearmor --yes --batch -o /usr/share/keyrings/google-cloud-ops-agent.gpg || true
-
-echo "deb [signed-by=/usr/share/keyrings/google-cloud-ops-agent.gpg] https://packages.cloud.google.com/apt google-cloud-ops-agent-jammy-all main" \
-  | sudo tee /etc/apt/sources.list.d/google-cloud-ops-agent.list >/dev/null
-
-# Update with retries; if signature error persists, fall back to vendor script
-sig_ok=0
-for i in {1..3}; do
-  if sudo apt-get update -y 2>&1 | tee /tmp/apt_update.log; then
-    if ! grep -q 'NO_PUBKEY' /tmp/apt_update.log; then
-      sig_ok=1; break
-    fi
-  fi
-  # fallback registers repo/key the "old" way (still supported by Google)
-  curl -sS https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh | sudo bash || true
-  sleep 3
-done
-
-# Install packages (retry-once pattern)
-if ! sudo apt-get install -y \
-      -o Dpkg::Options::=--force-confdef \
-      -o Dpkg::Options::=--force-confold \
-      google-cloud-ops-agent auditd inotify-tools rsync openssl curl; then
-  sudo apt-get update -y || true
-  sudo apt-get install -y \
-      -o Dpkg::Options::=--force-confdef \
-      -o Dpkg::Options::=--force-confold \
-      google-cloud-ops-agent auditd inotify-tools rsync openssl curl
-fi
-
-sudo systemctl enable --now auditd
-
-# Minimal audit rules for /data
-echo '-w /data -p rwa -k data_changes' | sudo tee /etc/audit/rules.d/99-data.rules >/dev/null
-sudo augenrules --load
-
-# Dedicated sync user & /data (ensure group exists, then user uses that group)
-if ! getent group sync >/dev/null 2>&1; then
-  sudo groupadd --system sync
-fi
-if ! id -u sync >/dev/null 2>&1; then
-  sudo useradd -m -g sync -s /usr/sbin/nologin sync
-fi
-
-## Ensure canonical home for sync (fix prior bad states like /bin)
-HOME_DIR="$(getent passwd sync | cut -d: -f6 || true)"
-if [[ "$HOME_DIR" != "/home/sync" ]]; then
-  if [[ "$HOME_DIR" == /home/* ]]; then
-    # Safe to move if old home was under /home
-    sudo usermod -d /home/sync -m sync
-  else
-    # Don't try to move system dirs like /bin; just set + prepare the new home
-    sudo mkdir -p /home/sync
-    sudo chown sync:sync /home/sync
-    sudo usermod -d /home/sync sync
-  fi
-fi
-
-# Ensure .ssh exists with correct ownership
-sudo install -d -m 700 -o sync -g sync /home/sync/.ssh
-
-sudo mkdir -p /data
-sudo chown -R sync:sync /data
-
-# Ops Agent: ingest auditd
-sudo tee /etc/google-cloud-ops-agent/config.yaml >/dev/null <<'YAML'
-logging:
-  receivers:
-    auditd:
-      type: files
-      include_paths: [/var/log/audit/audit.log]
-  service:
-    pipelines:
-      default_pipeline:
-        receivers: [auditd]
-YAML
-
-sudo systemctl restart google-cloud-ops-agent
-EOF
+# # Refresh OS Login key TTL again right before SSH phases (belt-and-suspenders)
+# gcloud compute os-login ssh-keys add --project "$PROJECT_ID" \
+#   --key-file="$SSH_KEY.pub" --ttl=24h || true
 
 
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE_BOOTSTRAP"
-gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE_BOOTSTRAP"
+# # ---- 5) Bootstrap packages / audit on both VMs --------------------------------
+# section "5) Bootstrap auditd + Ops Agent + rsync + inotify"
+# read -r -d '' REMOTE_BOOTSTRAP <<'EOF' || true
+# set -Eeuo pipefail
 
-# ---- 6) SSH trust (keypair + host key pinning) --------------------------------
-section "6) SSH trust for sync user with host key pinning"
+# # Non-interactive apt to avoid debconf prompts
+# export DEBIAN_FRONTEND=noninteractive
 
-# Generate key on VM1 if missing
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo -u sync bash -lc 'H=/home/sync; test -f \$H/.ssh/id_ed25519 || (install -d -m 700 -o sync -g sync \$H/.ssh && ssh-keygen -t ed25519 -N \"\" -f \$H/.ssh/id_ed25519)'"
+# # Make apt resilient + IPv4-only (avoids IPv6 reachability issues)
+# sudo mkdir -p /etc/apt/apt.conf.d
+# echo 'Acquire::ForceIPv4 "true"; Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
+
+# # Update with retries
+# for i in {1..5}; do
+#   if sudo apt-get update -y; then break; fi
+#   sleep 5
+# done
+
+# # Add Ops Agent repo (idempotent, correct key source) + resilient fallback
+# sudo install -d -m 0755 /usr/share/keyrings
+# # Correct URL and non-interactive dearmor
+# curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+#   | sudo gpg --dearmor --yes --batch -o /usr/share/keyrings/google-cloud-ops-agent.gpg || true
+
+# echo "deb [signed-by=/usr/share/keyrings/google-cloud-ops-agent.gpg] https://packages.cloud.google.com/apt google-cloud-ops-agent-jammy-all main" \
+#   | sudo tee /etc/apt/sources.list.d/google-cloud-ops-agent.list >/dev/null
+
+# # Update with retries; if signature error persists, fall back to vendor script
+# sig_ok=0
+# for i in {1..3}; do
+#   if sudo apt-get update -y 2>&1 | tee /tmp/apt_update.log; then
+#     if ! grep -q 'NO_PUBKEY' /tmp/apt_update.log; then
+#       sig_ok=1; break
+#     fi
+#   fi
+#   # fallback registers repo/key the "old" way (still supported by Google)
+#   curl -sS https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh | sudo bash || true
+#   sleep 3
+# done
+
+# # Install packages (retry-once pattern)
+# if ! sudo apt-get install -y \
+#       -o Dpkg::Options::=--force-confdef \
+#       -o Dpkg::Options::=--force-confold \
+#       google-cloud-ops-agent auditd inotify-tools rsync openssl curl; then
+#   sudo apt-get update -y || true
+#   sudo apt-get install -y \
+#       -o Dpkg::Options::=--force-confdef \
+#       -o Dpkg::Options::=--force-confold \
+#       google-cloud-ops-agent auditd inotify-tools rsync openssl curl
+# fi
+
+# sudo systemctl enable --now auditd
+
+# # Minimal audit rules for /data
+# echo '-w /data -p rwa -k data_changes' | sudo tee /etc/audit/rules.d/99-data.rules >/dev/null
+# sudo augenrules --load
+
+# # Dedicated sync user & /data (ensure group exists, then user uses that group)
+# if ! getent group sync >/dev/null 2>&1; then
+#   sudo groupadd --system sync
+# fi
+# if ! id -u sync >/dev/null 2>&1; then
+#   sudo useradd -m -g sync -s /usr/sbin/nologin sync
+# fi
+
+# ## Ensure canonical home for sync (fix prior bad states like /bin)
+# HOME_DIR="$(getent passwd sync | cut -d: -f6 || true)"
+# if [[ "$HOME_DIR" != "/home/sync" ]]; then
+#   if [[ "$HOME_DIR" == /home/* ]]; then
+#     # Safe to move if old home was under /home
+#     sudo usermod -d /home/sync -m sync
+#   else
+#     # Don't try to move system dirs like /bin; just set + prepare the new home
+#     sudo mkdir -p /home/sync
+#     sudo chown sync:sync /home/sync
+#     sudo usermod -d /home/sync sync
+#   fi
+# fi
+
+# # Ensure .ssh exists with correct ownership
+# sudo install -d -m 700 -o sync -g sync /home/sync/.ssh
+
+# sudo mkdir -p /data
+# sudo chown -R sync:sync /data
+
+# # Ops Agent: ingest auditd
+# sudo tee /etc/google-cloud-ops-agent/config.yaml >/dev/null <<'YAML'
+# logging:
+#   receivers:
+#     auditd:
+#       type: files
+#       include_paths: [/var/log/audit/audit.log]
+#   service:
+#     pipelines:
+#       default_pipeline:
+#         receivers: [auditd]
+# YAML
+
+# sudo systemctl restart google-cloud-ops-agent
+# EOF
+
+
+# gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE_BOOTSTRAP"
+# gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE_BOOTSTRAP"
+
+# # ---- 6) SSH trust (keypair + host key pinning) --------------------------------
+# section "6) SSH trust for sync user with host key pinning"
+
+# # Generate key on VM1 if missing
+# gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+#   "sudo -u sync bash -lc 'H=/home/sync; test -f \$H/.ssh/id_ed25519 || (install -d -m 700 -o sync -g sync \$H/.ssh && ssh-keygen -t ed25519 -N \"\" -f \$H/.ssh/id_ed25519)'"
  
-PUBKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "sudo -u sync bash -lc 'cat /home/sync/.ssh/id_ed25519.pub'")"
+# PUBKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "sudo -u sync bash -lc 'cat /home/sync/.ssh/id_ed25519.pub'")"
 
-# Create known_hosts on VM1 for IP2 (host key pin)
-HOSTKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "ssh-keyscan -T 5 -t rsa,ecdsa,ed25519 $IP2" 2>/dev/null || true)"
-if [[ -n "$HOSTKEY" ]]; then
-  gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-    "sudo -u sync bash -lc 'H=/home/sync; install -d -m 700 -o sync -g sync \$H/.ssh; grep -q \"${IP2}\" \$H/.ssh/known_hosts 2>/dev/null || echo \"$HOSTKEY\" >> \$H/.ssh/known_hosts; chmod 600 \$H/.ssh/known_hosts'"
-fi
+# # Create known_hosts on VM1 for IP2 (host key pin)
+# HOSTKEY="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "ssh-keyscan -T 5 -t rsa,ecdsa,ed25519 $IP2" 2>/dev/null || true)"
+# if [[ -n "$HOSTKEY" ]]; then
+#   gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+#     "sudo -u sync bash -lc 'H=/home/sync; install -d -m 700 -o sync -g sync \$H/.ssh; grep -q \"${IP2}\" \$H/.ssh/known_hosts 2>/dev/null || echo \"$HOSTKEY\" >> \$H/.ssh/known_hosts; chmod 600 \$H/.ssh/known_hosts'"
+# fi
 
-# Push authorized key to VM2 for sync user (restrict source by IP1)
-gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo -u sync bash -lc 'H=/home/sync; install -d -m 700 -o sync -g sync \$H/.ssh; grep -q \"${PUBKEY}\" \$H/.ssh/authorized_keys 2>/dev/null || echo \"from=${IP1} ${PUBKEY}\" >> \$H/.ssh/authorized_keys; chmod 600 \$H/.ssh/authorized_keys'"
+# # Push authorized key to VM2 for sync user (restrict source by IP1)
+# gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+#   "sudo -u sync bash -lc 'H=/home/sync; install -d -m 700 -o sync -g sync \$H/.ssh; grep -q \"${PUBKEY}\" \$H/.ssh/authorized_keys 2>/dev/null || echo \"from=${IP1} ${PUBKEY}\" >> \$H/.ssh/authorized_keys; chmod 600 \$H/.ssh/authorized_keys'"
 
-section "7) Secure rsync every 5m with confirmation (replaces continuous-sync)"
+# section "7) Secure rsync every 5m with confirmation (replaces continuous-sync)"
 
-# Disable & remove any old unit
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  'sudo systemctl disable --now continuous-sync 2>/dev/null || true; \
-   sudo rm -f /etc/systemd/system/continuous-sync.service /usr/local/bin/continuous-sync.sh; \
-   sudo systemctl daemon-reload || true'
+# # Disable & remove any old unit
+# gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+#   'sudo systemctl disable --now continuous-sync 2>/dev/null || true; \
+#    sudo rm -f /etc/systemd/system/continuous-sync.service /usr/local/bin/continuous-sync.sh; \
+#    sudo systemctl daemon-reload || true'
 
-read -r -d '' RSYNC_SCRIPT <<'EOF' || true
-#!/usr/bin/env bash
-set -Eeuo pipefail
-DEST_USER="sync"
-DEST_HOST="%IP2%"
-SRC_DIR="/data/"
-DEST_DIR="/data/"
-SSH_OPTS="-o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=/home/sync/.ssh/known_hosts -i /home/sync/.ssh/id_ed25519"
-mapfile -t local_list < <(find "$SRC_DIR" -maxdepth 1 -type f -name "dummy-*.bin" -printf "%f:%s\n" | sort)
-rsync -a --delete -e "ssh $SSH_OPTS" "$SRC_DIR" "${DEST_USER}@${DEST_HOST}:${DEST_DIR}"
-remote_list="$(ssh $SSH_OPTS ${DEST_USER}@${DEST_HOST} 'find "'"$DEST_DIR"'" -maxdepth 1 -type f -name "dummy-*.bin" -printf "%f:%s\n" | sort')"
-ok=1
-for entry in "${local_list[@]}"; do
-  if ! grep -qx "$entry" <<<"$remote_list"; then
-    echo "MISMATCH: $entry missing or size differs on ${DEST_HOST}" >&2
-    ok=0
-  fi
-done
-[[ $ok -eq 1 ]] && echo "SYNC_OK $(date -u +%FT%TZ) : ${#local_list[@]} files confirmed on ${DEST_HOST}"
-exit $(( ok ? 0 : 1 ))
-EOF
-RSYNC_SCRIPT="${RSYNC_SCRIPT//%IP2%/$IP2}"
+# read -r -d '' RSYNC_SCRIPT <<'EOF' || true
+# #!/usr/bin/env bash
+# set -Eeuo pipefail
+# DEST_USER="sync"
+# DEST_HOST="%IP2%"
+# SRC_DIR="/data/"
+# DEST_DIR="/data/"
+# SSH_OPTS="-o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=/home/sync/.ssh/known_hosts -i /home/sync/.ssh/id_ed25519"
+# mapfile -t local_list < <(find "$SRC_DIR" -maxdepth 1 -type f -name "dummy-*.bin" -printf "%f:%s\n" | sort)
+# rsync -a --delete -e "ssh $SSH_OPTS" "$SRC_DIR" "${DEST_USER}@${DEST_HOST}:${DEST_DIR}"
+# remote_list="$(ssh $SSH_OPTS ${DEST_USER}@${DEST_HOST} 'find "'"$DEST_DIR"'" -maxdepth 1 -type f -name "dummy-*.bin" -printf "%f:%s\n" | sort')"
+# ok=1
+# for entry in "${local_list[@]}"; do
+#   if ! grep -qx "$entry" <<<"$remote_list"; then
+#     echo "MISMATCH: $entry missing or size differs on ${DEST_HOST}" >&2
+#     ok=0
+#   fi
+# done
+# [[ $ok -eq 1 ]] && echo "SYNC_OK $(date -u +%FT%TZ) : ${#local_list[@]} files confirmed on ${DEST_HOST}"
+# exit $(( ok ? 0 : 1 ))
+# EOF
+# RSYNC_SCRIPT="${RSYNC_SCRIPT//%IP2%/$IP2}"
 
-read -r -d '' RSYNC_SERVICE <<'EOF' || true
-[Unit]
-Description=Rsync /data to peer and verify presence and size on peer
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=oneshot
-User=sync
-Group=sync
-ExecStart=/usr/local/bin/rsync-to-peer.sh
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=read-only
-PrivateTmp=true
-[Install]
-WantedBy=multi-user.target
-EOF
+# read -r -d '' RSYNC_SERVICE <<'EOF' || true
+# [Unit]
+# Description=Rsync /data to peer and verify presence and size on peer
+# After=network-online.target
+# Wants=network-online.target
+# [Service]
+# Type=oneshot
+# User=sync
+# Group=sync
+# ExecStart=/usr/local/bin/rsync-to-peer.sh
+# NoNewPrivileges=true
+# ProtectSystem=full
+# ProtectHome=read-only
+# PrivateTmp=true
+# [Install]
+# WantedBy=multi-user.target
+# EOF
 
-read -r -d '' RSYNC_TIMER <<'EOF' || true
-[Unit]
-Description=Run rsync-to-peer every 5 minutes
-[Timer]
-OnBootSec=45
-OnUnitActiveSec=5min
-Unit=rsync-to-peer.service
-[Install]
-WantedBy=timers.target
-EOF
+# read -r -d '' RSYNC_TIMER <<'EOF' || true
+# [Unit]
+# Description=Run rsync-to-peer every 5 minutes
+# [Timer]
+# OnBootSec=45
+# OnUnitActiveSec=5min
+# Unit=rsync-to-peer.service
+# [Install]
+# WantedBy=timers.target
+# EOF
 
-remote_put "$VM1" /usr/local/bin/rsync-to-peer.sh 755 "$RSYNC_SCRIPT"
-remote_put "$VM1" /etc/systemd/system/rsync-to-peer.service 644 "$RSYNC_SERVICE"
-remote_put "$VM1" /etc/systemd/system/rsync-to-peer.timer   644 "$RSYNC_TIMER"
+# remote_put "$VM1" /usr/local/bin/rsync-to-peer.sh 755 "$RSYNC_SCRIPT"
+# remote_put "$VM1" /etc/systemd/system/rsync-to-peer.service 644 "$RSYNC_SERVICE"
+# remote_put "$VM1" /etc/systemd/system/rsync-to-peer.timer   644 "$RSYNC_TIMER"
 
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo systemctl daemon-reload; sudo systemctl enable --now rsync-to-peer.timer; systemctl list-timers --all | sed -n '1,8p'"
-
-
-# ---- 8) Summary / Verification hints ------------------------------------------
-section "8) Summary & verification"
-cat <<OUT
-VMs:
- - ${VM1} @ ${IP1}
- - ${VM2} @ ${IP2}
-
-Run these to verify controls:
-  gcloud compute instances describe ${VM1} --zone ${ZONE} | grep -A5 shieldedInstanceConfig
-  gcloud compute disks describe ${VM1} --zone ${ZONE} | grep kmsKeyName
-  gcloud kms keys describe ${KEY} --keyring ${KEYRING} --location ${KEY_LOC} | egrep 'rotation|nextRotationTime'
-  gcloud compute instances list --project ${PROJECT_ID} --filter="name~'${VM1}|${VM2}'" --format="table(name,networkInterfaces[].accessConfigs)"
-  gcloud compute firewall-rules list --project ${PROJECT_ID} --filter="name=allow-iap-ssh OR name=allow-internal"
-  gcloud compute routers describe ${NETWORK}-router --region ${REGION} --project ${PROJECT_ID} | sed -n '1,80p'
-  gcloud compute routers nats describe ${NETWORK}-nat --router ${NETWORK}-router --region ${REGION} --project ${PROJECT_ID} | sed -n '1,80p'
-
-  # On VM1:
-    #   sudo systemctl status rsync-to-peer.service
-    #   journalctl -u rsync-to-peer --no-pager | tail -n 50
-
-Compliance notes (manual + policy):
- - Accept GDPR DP Addendum + HIPAA BAA (if applicable) in IAM & Admin > Legal & Compliance.
- - Store CIS/OpenSCAP reports and SCC findings export as audit evidence.
-OUT
-
-section "9) Dummy data generator on vm-a (100MB/2m, 3GB cap)"
-
-read -r -d '' GEN_SCRIPT <<'EOF' || true
-#!/usr/bin/env bash
-set -Eeuo pipefail
-DIR="/data"
-SIZE_MB=100
-MAX_BYTES=$((3*1024*1024*1024))
-ts="$(date -u +%Y%m%dT%H%M%SZ)"
-file="${DIR}/dummy-${ts}.bin"
-dd if=/dev/zero of="$file" bs=1M count="${SIZE_MB}" status=none
-chown sync:sync "$file"
-total="$(du -sb "$DIR" | cut -f1)"
-while (( total > MAX_BYTES )); do
-  old="$(ls -1tr "$DIR"/dummy-*.bin 2>/dev/null | head -n 1 || true)"
-  [[ -n "$old" ]] || break
-  rm -f -- "$old"
-  total="$(du -sb "$DIR" | cut -f1)"
-done
-EOF
-
-read -r -d '' GEN_SERVICE <<'EOF' || true
-[Unit]
-Description=Create 100MB dummy file in /data and rotate to 3GB
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=oneshot
-User=sync
-Group=sync
-ExecStart=/usr/local/bin/generate-dummy.sh
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=read-only
-PrivateTmp=true
-[Install]
-WantedBy=multi-user.target
-EOF
-
-read -r -d '' GEN_TIMER <<'EOF' || true
-[Unit]
-Description=Run generate-dummy every 2 minutes
-[Timer]
-OnBootSec=30
-OnUnitActiveSec=2min
-Unit=generate-dummy.service
-[Install]
-WantedBy=timers.target
-EOF
-
-remote_put "$VM1" /usr/local/bin/generate-dummy.sh 755 "$GEN_SCRIPT"
-remote_put "$VM1" /etc/systemd/system/generate-dummy.service 644 "$GEN_SERVICE"
-remote_put "$VM1" /etc/systemd/system/generate-dummy.timer   644 "$GEN_TIMER"
-
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo systemctl daemon-reload; sudo systemctl enable --now generate-dummy.timer; systemctl list-timers --all | sed -n '1,12p'"
+# gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+#   "sudo systemctl daemon-reload; sudo systemctl enable --now rsync-to-peer.timer; systemctl list-timers --all | sed -n '1,8p'"
 
 
-section "10) HTTPS API on vm-a (TLS with pinned CA) + vm-b fetcher"
+# # ---- 8) Summary / Verification hints ------------------------------------------
+# section "8) Summary & verification"
+# cat <<OUT
+# VMs:
+#  - ${VM1} @ ${IP1}
+#  - ${VM2} @ ${IP2}
 
-# Create CA/server certs only if missing
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo bash -lc '
-set -Eeuo pipefail
-# dir readable by group sync so the service user can traverse it
-install -d -m 750 -o root -g sync /etc/ssl/vma
-if [[ ! -f /etc/ssl/vma/server.crt ]]; then
-  cat >/etc/ssl/vma/openssl.cnf <<CNF
-[req]
-distinguished_name = dn
-req_extensions = req_ext
-prompt = no
-[dn]
-CN = vm-a-internal
-[req_ext]
-subjectAltName = @alt_names
-[alt_names]
-IP.1 = ${IP1}
-DNS.1 = vm-a
-CNF
+# Run these to verify controls:
+#   gcloud compute instances describe ${VM1} --zone ${ZONE} | grep -A5 shieldedInstanceConfig
+#   gcloud compute disks describe ${VM1} --zone ${ZONE} | grep kmsKeyName
+#   gcloud kms keys describe ${KEY} --keyring ${KEYRING} --location ${KEY_LOC} | egrep 'rotation|nextRotationTime'
+#   gcloud compute instances list --project ${PROJECT_ID} --filter="name~'${VM1}|${VM2}'" --format="table(name,networkInterfaces[].accessConfigs)"
+#   gcloud compute firewall-rules list --project ${PROJECT_ID} --filter="name=allow-iap-ssh OR name=allow-internal"
+#   gcloud compute routers describe ${NETWORK}-router --region ${REGION} --project ${PROJECT_ID} | sed -n '1,80p'
+#   gcloud compute routers nats describe ${NETWORK}-nat --router ${NETWORK}-router --region ${REGION} --project ${PROJECT_ID} | sed -n '1,80p'
 
-  # CA (root-only)
-  openssl genrsa -out /etc/ssl/vma/ca.key 4096
-  openssl req -x509 -new -key /etc/ssl/vma/ca.key -sha256 -days 3650 \
-    -out /etc/ssl/vma/ca.crt -subj \"/CN=vm-a-internal-ca\"
+#   # On VM1:
+#     #   sudo systemctl status rsync-to-peer.service
+#     #   journalctl -u rsync-to-peer --no-pager | tail -n 50
 
-  # server cert used by the sync user service
-  openssl genrsa -out /etc/ssl/vma/server.key 2048
-  openssl req -new -key /etc/ssl/vma/server.key \
-    -out /etc/ssl/vma/server.csr -config /etc/ssl/vma/openssl.cnf
-  openssl x509 -req -in /etc/ssl/vma/server.csr -CA /etc/ssl/vma/ca.crt -CAkey /etc/ssl/vma/ca.key -CAcreateserial \
-    -out /etc/ssl/vma/server.crt -days 825 -sha256 -extensions req_ext -extfile /etc/ssl/vma/openssl.cnf
+# Compliance notes (manual + policy):
+#  - Accept GDPR DP Addendum + HIPAA BAA (if applicable) in IAM & Admin > Legal & Compliance.
+#  - Store CIS/OpenSCAP reports and SCC findings export as audit evidence.
+# OUT
 
-  # permissions: CA key root-only; server key readable by group sync
-  chown root:root /etc/ssl/vma/ca.key
-  chmod 600 /etc/ssl/vma/ca.key
-  chown root:sync /etc/ssl/vma/server.key
-  chmod 640 /etc/ssl/vma/server.key
-  chmod 644 /etc/ssl/vma/*.crt
-fi
-'"
+# section "9) Dummy data generator on vm-a (100MB/2m, 3GB cap)"
 
-read -r -d '' API_PY <<'PY' || true
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json, os, ssl
-class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/health":
-            self.send_response(200); self.send_header("Content-Type","application/json"); self.end_headers()
-            self.wfile.write(json.dumps({"status":"ok"}).encode())
-        elif self.path == "/files":
-            files=[]
-            for n in sorted(os.listdir("/data")):
-                p=os.path.join("/data",n)
-                if os.path.isfile(p): files.append({"name":n,"size":os.path.getsize(p)})
-            self.send_response(200); self.send_header("Content-Type","application/json"); self.end_headers()
-            self.wfile.write(json.dumps(files).encode())
-        else:
-            self.send_response(404); self.end_headers()
-if __name__=="__main__":
-    httpd=HTTPServer(("0.0.0.0",8443),H)
-    ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain("/etc/ssl/vma/server.crt","/etc/ssl/vma/server.key")
-    httpd.socket=ctx.wrap_socket(httpd.socket, server_side=True)
-    httpd.serve_forever()
-PY
+# read -r -d '' GEN_SCRIPT <<'EOF' || true
+# #!/usr/bin/env bash
+# set -Eeuo pipefail
+# DIR="/data"
+# SIZE_MB=100
+# MAX_BYTES=$((3*1024*1024*1024))
+# ts="$(date -u +%Y%m%dT%H%M%SZ)"
+# file="${DIR}/dummy-${ts}.bin"
+# dd if=/dev/zero of="$file" bs=1M count="${SIZE_MB}" status=none
+# chown sync:sync "$file"
+# total="$(du -sb "$DIR" | cut -f1)"
+# while (( total > MAX_BYTES )); do
+#   old="$(ls -1tr "$DIR"/dummy-*.bin 2>/dev/null | head -n 1 || true)"
+#   [[ -n "$old" ]] || break
+#   rm -f -- "$old"
+#   total="$(du -sb "$DIR" | cut -f1)"
+# done
+# EOF
 
-read -r -d '' API_SVC <<'EOF' || true
-[Unit]
-Description=Minimal HTTPS API on vm-a (TLS pinned CA)
-After=network-online.target
-Wants=network-online.target
-[Service]
-User=sync
-Group=sync
-ExecStart=/usr/bin/python3 /usr/local/bin/secure-api.py
-Restart=always
-RestartSec=3
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=read-only
-PrivateTmp=true
-[Install]
-WantedBy=multi-user.target
-EOF
+# read -r -d '' GEN_SERVICE <<'EOF' || true
+# [Unit]
+# Description=Create 100MB dummy file in /data and rotate to 3GB
+# After=network-online.target
+# Wants=network-online.target
+# [Service]
+# Type=oneshot
+# User=sync
+# Group=sync
+# ExecStart=/usr/local/bin/generate-dummy.sh
+# NoNewPrivileges=true
+# ProtectSystem=full
+# ProtectHome=read-only
+# PrivateTmp=true
+# [Install]
+# WantedBy=multi-user.target
+# EOF
 
-remote_put "$VM1" /usr/local/bin/secure-api.py 755 "$API_PY"
-remote_put "$VM1" /etc/systemd/system/secure-api.service 644 "$API_SVC"
-gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo systemctl daemon-reload; sudo systemctl enable --now secure-api; sleep 1; sudo ss -lntp | awk 'NR==1||/8443/'"
+# read -r -d '' GEN_TIMER <<'EOF' || true
+# [Unit]
+# Description=Run generate-dummy every 2 minutes
+# [Timer]
+# OnBootSec=30
+# OnUnitActiveSec=2min
+# Unit=generate-dummy.service
+# [Install]
+# WantedBy=timers.target
+# EOF
 
-# Copy CA to vm-b and set fetcher
-CA_PEM="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command 'sudo cat /etc/ssl/vma/ca.crt')"
-gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo install -d -m 0755 /etc/ssl/localcerts; printf '%s\n' '$CA_PEM' | sudo tee /etc/ssl/localcerts/vm-a-ca.crt >/dev/null; sudo chmod 644 /etc/ssl/localcerts/vm-a-ca.crt"
+# remote_put "$VM1" /usr/local/bin/generate-dummy.sh 755 "$GEN_SCRIPT"
+# remote_put "$VM1" /etc/systemd/system/generate-dummy.service 644 "$GEN_SERVICE"
+# remote_put "$VM1" /etc/systemd/system/generate-dummy.timer   644 "$GEN_TIMER"
 
-read -r -d '' FETCH_SCRIPT <<'EOF' || true
-#!/usr/bin/env bash
-set -Eeuo pipefail
-CA=/etc/ssl/localcerts/vm-a-ca.crt
-BASE="https://%IP1%:8443"
-curl --silent --show-error --fail --cacert "$CA" "$BASE/health"
-curl --silent --show-error --fail --cacert "$CA" "$BASE/files" | head -c 200
-echo
-EOF
-FETCH_SCRIPT="${FETCH_SCRIPT//%IP1%/$IP1}"
+# gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+#   "sudo systemctl daemon-reload; sudo systemctl enable --now generate-dummy.timer; systemctl list-timers --all | sed -n '1,12p'"
 
-read -r -d '' FETCH_SERVICE <<'EOF' || true
-[Unit]
-Description=Poll vm-a HTTPS API with pinned CA
-After=network-online.target
-Wants=network-online.target
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/fetch-vma-api.sh
-[Install]
-WantedBy=multi-user.target
-EOF
 
-read -r -d '' FETCH_TIMER <<'EOF' || true
-[Unit]
-Description=Fetch vm-a API every 5 minutes
-[Timer]
-OnBootSec=60
-OnUnitActiveSec=5min
-Unit=fetch-vma-api.service
-[Install]
-WantedBy=timers.target
-EOF
+# section "10) HTTPS API on vm-a (TLS with pinned CA) + vm-b fetcher"
 
-remote_put "$VM2" /usr/local/bin/fetch-vma-api.sh 755 "$FETCH_SCRIPT"
-remote_put "$VM2" /etc/systemd/system/fetch-vma-api.service 644 "$FETCH_SERVICE"
-remote_put "$VM2" /etc/systemd/system/fetch-vma-api.timer   644 "$FETCH_TIMER"
+# # Create CA/server certs only if missing
+# gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+#   "sudo bash -lc '
+# set -Eeuo pipefail
+# # dir readable by group sync so the service user can traverse it
+# install -d -m 750 -o root -g sync /etc/ssl/vma
+# if [[ ! -f /etc/ssl/vma/server.crt ]]; then
+#   cat >/etc/ssl/vma/openssl.cnf <<CNF
+# [req]
+# distinguished_name = dn
+# req_extensions = req_ext
+# prompt = no
+# [dn]
+# CN = vm-a-internal
+# [req_ext]
+# subjectAltName = @alt_names
+# [alt_names]
+# IP.1 = ${IP1}
+# DNS.1 = vm-a
+# CNF
 
-gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
-  "sudo systemctl daemon-reload; sudo systemctl enable --now fetch-vma-api.timer; systemctl list-timers --all | sed -n '1,12p'"
+#   # CA (root-only)
+#   openssl genrsa -out /etc/ssl/vma/ca.key 4096
+#   openssl req -x509 -new -key /etc/ssl/vma/ca.key -sha256 -days 3650 \
+#     -out /etc/ssl/vma/ca.crt -subj \"/CN=vm-a-internal-ca\"
+
+#   # server cert used by the sync user service
+#   openssl genrsa -out /etc/ssl/vma/server.key 2048
+#   openssl req -new -key /etc/ssl/vma/server.key \
+#     -out /etc/ssl/vma/server.csr -config /etc/ssl/vma/openssl.cnf
+#   openssl x509 -req -in /etc/ssl/vma/server.csr -CA /etc/ssl/vma/ca.crt -CAkey /etc/ssl/vma/ca.key -CAcreateserial \
+#     -out /etc/ssl/vma/server.crt -days 825 -sha256 -extensions req_ext -extfile /etc/ssl/vma/openssl.cnf
+
+#   # permissions: CA key root-only; server key readable by group sync
+#   chown root:root /etc/ssl/vma/ca.key
+#   chmod 600 /etc/ssl/vma/ca.key
+#   chown root:sync /etc/ssl/vma/server.key
+#   chmod 640 /etc/ssl/vma/server.key
+#   chmod 644 /etc/ssl/vma/*.crt
+# fi
+# '"
+
+# read -r -d '' API_PY <<'PY' || true
+# from http.server import HTTPServer, BaseHTTPRequestHandler
+# import json, os, ssl
+# class H(BaseHTTPRequestHandler):
+#     def do_GET(self):
+#         if self.path == "/health":
+#             self.send_response(200); self.send_header("Content-Type","application/json"); self.end_headers()
+#             self.wfile.write(json.dumps({"status":"ok"}).encode())
+#         elif self.path == "/files":
+#             files=[]
+#             for n in sorted(os.listdir("/data")):
+#                 p=os.path.join("/data",n)
+#                 if os.path.isfile(p): files.append({"name":n,"size":os.path.getsize(p)})
+#             self.send_response(200); self.send_header("Content-Type","application/json"); self.end_headers()
+#             self.wfile.write(json.dumps(files).encode())
+#         else:
+#             self.send_response(404); self.end_headers()
+# if __name__=="__main__":
+#     httpd=HTTPServer(("0.0.0.0",8443),H)
+#     ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+#     ctx.load_cert_chain("/etc/ssl/vma/server.crt","/etc/ssl/vma/server.key")
+#     httpd.socket=ctx.wrap_socket(httpd.socket, server_side=True)
+#     httpd.serve_forever()
+# PY
+
+# read -r -d '' API_SVC <<'EOF' || true
+# [Unit]
+# Description=Minimal HTTPS API on vm-a (TLS pinned CA)
+# After=network-online.target
+# Wants=network-online.target
+# [Service]
+# User=sync
+# Group=sync
+# ExecStart=/usr/bin/python3 /usr/local/bin/secure-api.py
+# Restart=always
+# RestartSec=3
+# NoNewPrivileges=true
+# ProtectSystem=full
+# ProtectHome=read-only
+# PrivateTmp=true
+# [Install]
+# WantedBy=multi-user.target
+# EOF
+
+# remote_put "$VM1" /usr/local/bin/secure-api.py 755 "$API_PY"
+# remote_put "$VM1" /etc/systemd/system/secure-api.service 644 "$API_SVC"
+# gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+#   "sudo systemctl daemon-reload; sudo systemctl enable --now secure-api; sleep 1; sudo ss -lntp | awk 'NR==1||/8443/'"
+
+# # Copy CA to vm-b and set fetcher
+# CA_PEM="$(gcloud compute ssh "$VM1" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command 'sudo cat /etc/ssl/vma/ca.crt')"
+# gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+#   "sudo install -d -m 0755 /etc/ssl/localcerts; printf '%s\n' '$CA_PEM' | sudo tee /etc/ssl/localcerts/vm-a-ca.crt >/dev/null; sudo chmod 644 /etc/ssl/localcerts/vm-a-ca.crt"
+
+# read -r -d '' FETCH_SCRIPT <<'EOF' || true
+# #!/usr/bin/env bash
+# set -Eeuo pipefail
+# CA=/etc/ssl/localcerts/vm-a-ca.crt
+# BASE="https://%IP1%:8443"
+# curl --silent --show-error --fail --cacert "$CA" "$BASE/health"
+# curl --silent --show-error --fail --cacert "$CA" "$BASE/files" | head -c 200
+# echo
+# EOF
+# FETCH_SCRIPT="${FETCH_SCRIPT//%IP1%/$IP1}"
+
+# read -r -d '' FETCH_SERVICE <<'EOF' || true
+# [Unit]
+# Description=Poll vm-a HTTPS API with pinned CA
+# After=network-online.target
+# Wants=network-online.target
+# [Service]
+# Type=oneshot
+# ExecStart=/usr/local/bin/fetch-vma-api.sh
+# [Install]
+# WantedBy=multi-user.target
+# EOF
+
+# read -r -d '' FETCH_TIMER <<'EOF' || true
+# [Unit]
+# Description=Fetch vm-a API every 5 minutes
+# [Timer]
+# OnBootSec=60
+# OnUnitActiveSec=5min
+# Unit=fetch-vma-api.service
+# [Install]
+# WantedBy=timers.target
+# EOF
+
+# remote_put "$VM2" /usr/local/bin/fetch-vma-api.sh 755 "$FETCH_SCRIPT"
+# remote_put "$VM2" /etc/systemd/system/fetch-vma-api.service 644 "$FETCH_SERVICE"
+# remote_put "$VM2" /etc/systemd/system/fetch-vma-api.timer   644 "$FETCH_TIMER"
+
+# gcloud compute ssh "$VM2" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command \
+#   "sudo systemctl daemon-reload; sudo systemctl enable --now fetch-vma-api.timer; systemctl list-timers --all | sed -n '1,12p'"
 
 
 
