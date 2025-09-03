@@ -903,35 +903,30 @@ run_checker "HIPAA" "$COMPLIANCE_DIR/hipaa.sh" \
 # If you want the autoconfig to fail pipeline on HIPAA fails, just forward exit code.
 
 
-# ---- Monitoring baseline (alert channel + minimal policy) ---------------------
+# ---- Monitoring baseline (notification channel + minimal alert) --------------
 section "Pre GDPR / DPDPR failsafe checking - Monitoring baseline (notification channel + minimal alert)"
 
-# Use the currently-authenticated account unless overridden: ALERT_EMAIL=you@org
 ACCOUNT="$(gcloud config get-value account)"
 ALERT_EMAIL="${ALERT_EMAIL:-$ACCOUNT}"
 
 CHAN_NAME="Security Alerts (email)"
-# Find existing channel (alpha is widely available in Cloud Shell; try GA/beta as well)
+# List existing channel (prefer GA; fall back to beta/alpha)
 CHAN_ID="$(
   gcloud monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
   || gcloud beta  monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
   || gcloud alpha monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
   || true
 )"
-
 if [[ -z "$CHAN_ID" ]]; then
-  # Create an email channel (try GA -> beta -> alpha)
-  if ! gcloud monitoring channels create \
-        --display-name="$CHAN_NAME" --type=email \
-        --channel-labels="email_address=${ALERT_EMAIL}" 2>/dev/null; then
-    if ! gcloud beta monitoring channels create \
-          --display-name="$CHAN_NAME" --type=email \
-          --channel-labels="email_address=${ALERT_EMAIL}" 2>/dev/null; then
-      gcloud alpha monitoring channels create \
-        --display-name="$CHAN_NAME" --type=email \
-        --channel-labels="email_address=${ALERT_EMAIL}"
-    fi
-  fi
+  gcloud monitoring channels create \
+    --display-name="$CHAN_NAME" --type=email \
+    --channel-labels="email_address=${ALERT_EMAIL}" 2>/dev/null \
+  || gcloud beta monitoring channels create \
+    --display-name="$CHAN_NAME" --type=email \
+    --channel-labels="email_address=${ALERT_EMAIL}" 2>/dev/null \
+  || gcloud alpha monitoring channels create \
+    --display-name="$CHAN_NAME" --type=email \
+    --channel-labels="email_address=${ALERT_EMAIL}"
   CHAN_ID="$(
     gcloud monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
     || gcloud beta  monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
@@ -941,15 +936,22 @@ if [[ -z "$CHAN_ID" ]]; then
 fi
 
 POL_NAME="High CPU on any VM"
-POL_ID="$(gcloud monitoring policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null || true)"
+# Prefer GA 'alert-policies' list; fall back to alpha 'policies' list
+POL_ID="$(
+  gcloud monitoring alert-policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null \
+  || gcloud beta  monitoring alert-policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null \
+  || gcloud alpha monitoring policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null \
+  || true
+)"
 
 if [[ -z "$POL_ID" ]]; then
   TMP=/tmp/high-cpu-policy.json
+  # GA/beta schema (mimeType)
   cat > "$TMP" <<'JSON'
 {
   "displayName": "High CPU on any VM",
   "combiner": "OR",
-  "documentation": {"content": "Autocreated to satisfy alerting readiness."},
+  "documentation": { "content": "Autocreated to satisfy alerting readiness.", "mimeType": "text/markdown" },
   "conditions": [{
     "displayName": "CPU > 90% for 5m",
     "conditionThreshold": {
@@ -962,21 +964,28 @@ if [[ -z "$POL_ID" ]]; then
       "comparison": "COMPARISON_GT",
       "thresholdValue": 0.9,
       "duration": "300s",
-      "trigger": {"count": 1}
+      "trigger": { "count": 1 }
     }
   }],
   "notificationChannels": []
 }
 JSON
-  # Attach channel if we have one
+
+  # Attach channel if present
   if [[ -n "$CHAN_ID" ]]; then
     jq --arg ch "$CHAN_ID" '.notificationChannels=[ $ch ]' "$TMP" > "${TMP}.new" && mv "${TMP}.new" "$TMP"
   fi
-  # Create the policy (try GA -> beta -> alpha)
-  gcloud monitoring policies create --policy-from-file="$TMP" \
-  || gcloud beta  monitoring policies create --policy-from-file="$TMP" \
-  || gcloud alpha monitoring policies create --policy-from-file="$TMP"
+
+  # Try GA first; then beta; then alpha with mime_type conversion
+  if ! gcloud monitoring alert-policies create --policy-from-file="$TMP" 2>/dev/null; then
+    if ! gcloud beta monitoring alert-policies create --policy-from-file="$TMP" 2>/dev/null; then
+      TMP_ALPHA="${TMP}.alpha"
+      jq '.documentation.mime_type = .documentation.mimeType | del(.documentation.mimeType)' "$TMP" > "$TMP_ALPHA"
+      gcloud alpha monitoring policies create --policy-from-file="$TMP_ALPHA"
+    fi
+  fi
 fi
+
 
 
 
