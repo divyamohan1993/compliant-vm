@@ -734,9 +734,13 @@ mkdir -p "$COMPLIANCE_DIR"
 mkdir -p ./compliance-reports
 
 section "Enable APIs needed for compliance ops (idempotent)"
+enable_api compute.googleapis.com
+enable_api oslogin.googleapis.com
+enable_api iap.googleapis.com
 enable_api logging.googleapis.com
 enable_api cloudkms.googleapis.com
 enable_api iam.googleapis.com
+
 
 
 section "Pre-HIPAA: ensure OS Login + IAP SSH prerequisites"

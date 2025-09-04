@@ -84,6 +84,10 @@ OS_LOGIN_USER="$(gcloud compute os-login describe-profile --project "$PROJECT_ID
   --format='value(posixAccounts[0].username)' || true)"
 SSH_COMMON=("${SSH_COMMON_BASE[@]}")
 [[ -n "$OS_LOGIN_USER" ]] && SSH_COMMON+=(--ssh-flag="-l ${OS_LOGIN_USER}")
+SSH_COMMON+=( --ssh-flag="-o ConnectTimeout=15" \
+              --ssh-flag="-o ServerAliveInterval=5" \
+              --ssh-flag="-o ServerAliveCountMax=2" )
+
 
 # ---- Helpers ------------------------------------------------------------------
 pass_list=(); fail_list=(); manual_list=(); probe_json=()
@@ -270,14 +274,18 @@ ssh_probe() {
     set +e
     trap - ERR
     gcloud compute ssh "$host" --zone "$ZONE" --project "$PROJECT_ID" \
-      "${SSH_COMMON[@]}" --command "$cmd" >"$tmp" 2>/dev/null
+      "${SSH_COMMON[@]}" --command "$cmd" >"$tmp.out" 2>"$tmp.err"
     echo $? >"$tmp.rc"
   )
   rc="$(cat "$tmp.rc" 2>/dev/null || echo 1)"
-  cat "$tmp"
-  rm -f "$tmp" "$tmp.rc"
+  cat "$tmp.out"
+  if (( rc != 0 )); then
+    log "DEBUG($host): $(head -n 6 "$tmp.err" | tr '\n' ' ')"
+  fi
+  rm -f "$tmp.out" "$tmp.err" "$tmp.rc"
   return "$rc"
 }
+
 
 if ((${#VMS[@]})); then
   for inst in "${VMS[@]}"; do
