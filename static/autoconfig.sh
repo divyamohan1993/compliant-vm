@@ -878,159 +878,159 @@ for inst in "$VM1" "$VM2"; do
 done
 
 
-# ---- HIPAA checker fetch & run -------------------------------------------------
-section "Fetch & run HIPAA checker (modular)"
+# # ---- HIPAA checker fetch & run -------------------------------------------------
+# section "Fetch & run HIPAA checker (modular)"
 
-# Pin to a specific version/branch/commit if you like:
-HIPAA_URL="${HIPAA_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/hipaa/hipaa.sh}"
+# # Pin to a specific version/branch/commit if you like:
+# HIPAA_URL="${HIPAA_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/hipaa/hipaa.sh}"
 
-# Always re-download latest unless pinned via HIPAA_PIN=1
-if [[ "${HIPAA_PIN:-0}" == "0" ]]; then
-  wget -qO "$COMPLIANCE_DIR/hipaa.sh" "$HIPAA_URL" 
-  chmod +x "$COMPLIANCE_DIR/hipaa.sh"
-else
-  [[ -x "$COMPLIANCE_DIR/hipaa.sh" ]] || { echo "Pinned hipaa.sh missing/executable bit"; exit 1; }
-fi
+# # Always re-download latest unless pinned via HIPAA_PIN=1
+# if [[ "${HIPAA_PIN:-0}" == "0" ]]; then
+#   wget -qO "$COMPLIANCE_DIR/hipaa.sh" "$HIPAA_URL" 
+#   chmod +x "$COMPLIANCE_DIR/hipaa.sh"
+# else
+#   [[ -x "$COMPLIANCE_DIR/hipaa.sh" ]] || { echo "Pinned hipaa.sh missing/executable bit"; exit 1; }
+# fi
 
-# Run read-only compliance (safe to call every autoconfig.sh run)
-run_checker "HIPAA" "$COMPLIANCE_DIR/hipaa.sh" \
-  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
-  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
-  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
-  --sa-email "$SA_EMAIL" \
-  --vm "$VM1" --vm "$VM2" \
-  --report-dir "./compliance-reports"
-
-
-# If you want the autoconfig to fail pipeline on HIPAA fails, just forward exit code.
+# # Run read-only compliance (safe to call every autoconfig.sh run)
+# run_checker "HIPAA" "$COMPLIANCE_DIR/hipaa.sh" \
+#   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+#   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+#   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+#   --sa-email "$SA_EMAIL" \
+#   --vm "$VM1" --vm "$VM2" \
+#   --report-dir "./compliance-reports"
 
 
-# ---- Monitoring baseline (notification channel + minimal alert) --------------
-section "Pre GDPR / DPDPR failsafe checking - Monitoring baseline (notification channel + minimal alert)"
-
-ACCOUNT="$(gcloud config get-value account)"
-ALERT_EMAIL="${ALERT_EMAIL:-$ACCOUNT}"
-
-CHAN_NAME="Security Alerts (email)"
-# List existing channel (prefer GA; fall back to beta/alpha)
-CHAN_ID="$(
-  gcloud monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
-  || gcloud beta  monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
-  || gcloud alpha monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
-  || true
-)"
-if [[ -z "$CHAN_ID" ]]; then
-  gcloud monitoring channels create \
-    --display-name="$CHAN_NAME" --type=email \
-    --channel-labels="email_address=${ALERT_EMAIL}" 2>/dev/null \
-  || gcloud beta monitoring channels create \
-    --display-name="$CHAN_NAME" --type=email \
-    --channel-labels="email_address=${ALERT_EMAIL}" 2>/dev/null \
-  || gcloud alpha monitoring channels create \
-    --display-name="$CHAN_NAME" --type=email \
-    --channel-labels="email_address=${ALERT_EMAIL}"
-  CHAN_ID="$(
-    gcloud monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
-    || gcloud beta  monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
-    || gcloud alpha monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
-    || true
-  )"
-fi
-
-POL_NAME="High CPU on any VM"
-# Prefer GA 'alert-policies' list; fall back to alpha 'policies' list
-POL_ID="$(
-  gcloud monitoring alert-policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null \
-  || gcloud beta  monitoring alert-policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null \
-  || gcloud alpha monitoring policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null \
-  || true
-)"
-
-if [[ -z "$POL_ID" ]]; then
-  TMP=/tmp/high-cpu-policy.json
-  # GA/beta schema (mimeType)
-  cat > "$TMP" <<'JSON'
-{
-  "displayName": "High CPU on any VM",
-  "combiner": "OR",
-  "documentation": { "content": "Autocreated to satisfy alerting readiness.", "mimeType": "text/markdown" },
-  "conditions": [{
-    "displayName": "CPU > 90% for 5m",
-    "conditionThreshold": {
-      "filter": "metric.type=\"compute.googleapis.com/instance/cpu/utilization\" resource.type=\"gce_instance\"",
-      "aggregations": [{
-        "alignmentPeriod": "300s",
-        "perSeriesAligner": "ALIGN_MEAN",
-        "crossSeriesReducer": "REDUCE_NONE"
-      }],
-      "comparison": "COMPARISON_GT",
-      "thresholdValue": 0.9,
-      "duration": "300s",
-      "trigger": { "count": 1 }
-    }
-  }],
-  "notificationChannels": []
-}
-JSON
-
-  # Attach channel if present
-  if [[ -n "$CHAN_ID" ]]; then
-    jq --arg ch "$CHAN_ID" '.notificationChannels=[ $ch ]' "$TMP" > "${TMP}.new" && mv "${TMP}.new" "$TMP"
-  fi
-
-  # Try GA first; then beta; then alpha with mime_type conversion
-  if ! gcloud monitoring alert-policies create --policy-from-file="$TMP" 2>/dev/null; then
-    if ! gcloud beta monitoring alert-policies create --policy-from-file="$TMP" 2>/dev/null; then
-      TMP_ALPHA="${TMP}.alpha"
-      jq '.documentation.mime_type = .documentation.mimeType | del(.documentation.mimeType)' "$TMP" > "$TMP_ALPHA"
-      gcloud alpha monitoring policies create --policy-from-file="$TMP_ALPHA"
-    fi
-  fi
-fi
+# # If you want the autoconfig to fail pipeline on HIPAA fails, just forward exit code.
 
 
+# # ---- Monitoring baseline (notification channel + minimal alert) --------------
+# section "Pre GDPR / DPDPR failsafe checking - Monitoring baseline (notification channel + minimal alert)"
+
+# ACCOUNT="$(gcloud config get-value account)"
+# ALERT_EMAIL="${ALERT_EMAIL:-$ACCOUNT}"
+
+# CHAN_NAME="Security Alerts (email)"
+# # List existing channel (prefer GA; fall back to beta/alpha)
+# CHAN_ID="$(
+#   gcloud monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+#   || gcloud beta  monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+#   || gcloud alpha monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+#   || true
+# )"
+# if [[ -z "$CHAN_ID" ]]; then
+#   gcloud monitoring channels create \
+#     --display-name="$CHAN_NAME" --type=email \
+#     --channel-labels="email_address=${ALERT_EMAIL}" 2>/dev/null \
+#   || gcloud beta monitoring channels create \
+#     --display-name="$CHAN_NAME" --type=email \
+#     --channel-labels="email_address=${ALERT_EMAIL}" 2>/dev/null \
+#   || gcloud alpha monitoring channels create \
+#     --display-name="$CHAN_NAME" --type=email \
+#     --channel-labels="email_address=${ALERT_EMAIL}"
+#   CHAN_ID="$(
+#     gcloud monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+#     || gcloud beta  monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+#     || gcloud alpha monitoring channels list --format="value(name)" --filter="displayName='$CHAN_NAME'" 2>/dev/null \
+#     || true
+#   )"
+# fi
+
+# POL_NAME="High CPU on any VM"
+# # Prefer GA 'alert-policies' list; fall back to alpha 'policies' list
+# POL_ID="$(
+#   gcloud monitoring alert-policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null \
+#   || gcloud beta  monitoring alert-policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null \
+#   || gcloud alpha monitoring policies list --format='value(name)' --filter="displayName='$POL_NAME'" 2>/dev/null \
+#   || true
+# )"
+
+# if [[ -z "$POL_ID" ]]; then
+#   TMP=/tmp/high-cpu-policy.json
+#   # GA/beta schema (mimeType)
+#   cat > "$TMP" <<'JSON'
+# {
+#   "displayName": "High CPU on any VM",
+#   "combiner": "OR",
+#   "documentation": { "content": "Autocreated to satisfy alerting readiness.", "mimeType": "text/markdown" },
+#   "conditions": [{
+#     "displayName": "CPU > 90% for 5m",
+#     "conditionThreshold": {
+#       "filter": "metric.type=\"compute.googleapis.com/instance/cpu/utilization\" resource.type=\"gce_instance\"",
+#       "aggregations": [{
+#         "alignmentPeriod": "300s",
+#         "perSeriesAligner": "ALIGN_MEAN",
+#         "crossSeriesReducer": "REDUCE_NONE"
+#       }],
+#       "comparison": "COMPARISON_GT",
+#       "thresholdValue": 0.9,
+#       "duration": "300s",
+#       "trigger": { "count": 1 }
+#     }
+#   }],
+#   "notificationChannels": []
+# }
+# JSON
+
+#   # Attach channel if present
+#   if [[ -n "$CHAN_ID" ]]; then
+#     jq --arg ch "$CHAN_ID" '.notificationChannels=[ $ch ]' "$TMP" > "${TMP}.new" && mv "${TMP}.new" "$TMP"
+#   fi
+
+#   # Try GA first; then beta; then alpha with mime_type conversion
+#   if ! gcloud monitoring alert-policies create --policy-from-file="$TMP" 2>/dev/null; then
+#     if ! gcloud beta monitoring alert-policies create --policy-from-file="$TMP" 2>/dev/null; then
+#       TMP_ALPHA="${TMP}.alpha"
+#       jq '.documentation.mime_type = .documentation.mimeType | del(.documentation.mimeType)' "$TMP" > "$TMP_ALPHA"
+#       gcloud alpha monitoring policies create --policy-from-file="$TMP_ALPHA"
+#     fi
+#   fi
+# fi
 
 
-# ---- GDPR checker fetch & run --------------------------------------------------
-section "Fetch & run GDPR checker (modular)"
 
-GDPR_URL="${GDPR_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/gdpr/gdpr.sh}"
 
-if [[ "${GDPR_PIN:-0}" == "0" ]]; then
-  wget -qO "$COMPLIANCE_DIR/gdpr.sh" "$GDPR_URL"
-  chmod +x "$COMPLIANCE_DIR/gdpr.sh"
-else
-  [[ -x "$COMPLIANCE_DIR/gdpr.sh" ]] || { echo "Pinned gdpr.sh missing/executable bit"; exit 1; }
-fi
+# # ---- GDPR checker fetch & run --------------------------------------------------
+# section "Fetch & run GDPR checker (modular)"
 
-run_checker "GDPR" "$COMPLIANCE_DIR/gdpr.sh" \
-  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
-  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
-  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
-  --sa-email "$SA_EMAIL" \
-  --vm "$VM1" --vm "$VM2" \
-  --report-dir "./compliance-reports"
+# GDPR_URL="${GDPR_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/gdpr/gdpr.sh}"
 
-# ---- DPDPR checker fetch & run -------------------------------------------------
-section "Fetch & run DPDPR checker (modular)"
+# if [[ "${GDPR_PIN:-0}" == "0" ]]; then
+#   wget -qO "$COMPLIANCE_DIR/gdpr.sh" "$GDPR_URL"
+#   chmod +x "$COMPLIANCE_DIR/gdpr.sh"
+# else
+#   [[ -x "$COMPLIANCE_DIR/gdpr.sh" ]] || { echo "Pinned gdpr.sh missing/executable bit"; exit 1; }
+# fi
 
-DPDPR_URL="${DPDPR_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/dpdpr/dpdpr.sh}"
+# run_checker "GDPR" "$COMPLIANCE_DIR/gdpr.sh" \
+#   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+#   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+#   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+#   --sa-email "$SA_EMAIL" \
+#   --vm "$VM1" --vm "$VM2" \
+#   --report-dir "./compliance-reports"
 
-# Always refresh unless pinned
-if [[ "${DPDPR_PIN:-0}" == "0" ]]; then
-  wget -qO "$COMPLIANCE_DIR/dpdpr.sh" "$DPDPR_URL"
-  chmod +x "$COMPLIANCE_DIR/dpdpr.sh"
-else
-  [[ -x "$COMPLIANCE_DIR/dpdpr.sh" ]] || { echo "Pinned dpdpr.sh missing/executable bit"; exit 1; }
-fi
+# # ---- DPDPR checker fetch & run -------------------------------------------------
+# section "Fetch & run DPDPR checker (modular)"
 
-run_checker "DPDPR" "$COMPLIANCE_DIR/dpdpr.sh" \
-  --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
-  --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
-  --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
-  --sa-email "$SA_EMAIL" \
-  --vm "$VM1" --vm "$VM2" \
-  --report-dir "./compliance-reports"
+# DPDPR_URL="${DPDPR_URL:-https://raw.githubusercontent.com/divyamohan1993/compliant-vm/refs/heads/main/static/compliance/dpdpr/dpdpr.sh}"
+
+# # Always refresh unless pinned
+# if [[ "${DPDPR_PIN:-0}" == "0" ]]; then
+#   wget -qO "$COMPLIANCE_DIR/dpdpr.sh" "$DPDPR_URL"
+#   chmod +x "$COMPLIANCE_DIR/dpdpr.sh"
+# else
+#   [[ -x "$COMPLIANCE_DIR/dpdpr.sh" ]] || { echo "Pinned dpdpr.sh missing/executable bit"; exit 1; }
+# fi
+
+# run_checker "DPDPR" "$COMPLIANCE_DIR/dpdpr.sh" \
+#   --project "$PROJECT_ID" --region "$REGION" --zone "$ZONE" \
+#   --network "$NETWORK" --subnet "$SUBNET" --router "${NETWORK}-router" --nat "${NETWORK}-nat" \
+#   --keyring "$KEYRING" --key "$KEY" --key-loc "$KEY_LOC" \
+#   --sa-email "$SA_EMAIL" \
+#   --vm "$VM1" --vm "$VM2" \
+#   --report-dir "./compliance-reports"
 
 # ---- PCI DSS L1 checker fetch & run -------------------------------------------
 section "Fetch & run PCI DSS v4.0.1 Level 1 checker (modular)"
