@@ -280,24 +280,19 @@ ssh_probe() {
 }
 
 
-# if ((${#VMS[@]})); then
-#   for inst in "${VMS[@]}"; do
-#     set +e
-#     out="$(gcloud compute ssh "$inst" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE" 2>/dev/null)"
-#     rc=$?
-#     set -e
-#     if (( rc != 0 )); then
-#       log "WARN: SSH probe failed on $inst (marking probe checks as FAIL)"
-#       fail_list+=("Auditd active on $inst"); fail_list+=("Audit rules present on $inst")
-#       fail_list+=("Ops Agent running on $inst"); fail_list+=("SSH password auth disabled on $inst")
-#       fail_list+=("SSH root login disabled on $inst"); fail_list+=("AIDE installed on $inst")
-#       fail_list+=("AIDE baseline present on $inst"); fail_list+=("Unattended upgrades enabled on $inst")
-#       fail_list+=("NTP sync enabled on $inst");   fail_list+=("Auto logoff (TMOUT) set on $inst")
-#       continue
-#     fi
 if ((${#VMS[@]})); then
   for inst in "${VMS[@]}"; do
-    if ! out="$(ssh_probe "$inst" "$REMOTE")"; then
+    set +e
+
+    # Refresh OS Login key TTL if a key was provided (prevents occasional SSH rc=1)
+    if [[ -n "$SSH_KEY" && -f "$SSH_KEY.pub" ]]; then
+      gcloud compute os-login ssh-keys add --project "$PROJECT_ID" --key-file="$SSH_KEY.pub" --ttl=24h >/dev/null 2>&1 || true
+    fi
+    
+    out="$(gcloud compute ssh "$inst" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE" 2>/dev/null)"
+    rc=$?
+    set -e
+    if (( rc != 0 )); then
       log "WARN: SSH probe failed on $inst (marking probe checks as FAIL)"
       fail_list+=("Auditd active on $inst"); fail_list+=("Audit rules present on $inst")
       fail_list+=("Ops Agent running on $inst"); fail_list+=("SSH password auth disabled on $inst")
@@ -306,7 +301,7 @@ if ((${#VMS[@]})); then
       fail_list+=("NTP sync enabled on $inst");   fail_list+=("Auto logoff (TMOUT) set on $inst")
       continue
     fi
-    
+
     echo "$out" | sed 's/^/  ['"$inst"'] /'
     auditd="$(grep '^AUDITD=' <<<"$out" | cut -d= -f2-)"
     rules="$(grep '^AUDIT_RULES=' <<<"$out" | cut -d= -f2-)"
