@@ -95,8 +95,13 @@ dedup() { awk '!seen[$0]++'; }
 # ---- Req 1: Network security controls ----------------------------------------
 section "Req 1 — Install and maintain network security controls"
 # No 0.0.0.0/0 ingress on the VPC
+# gcloud compute firewall-rules list --project "$PROJECT_ID" \
+#   --filter="network=$NETWORK AND direction=INGRESS AND disabled=false" --format=json > /tmp/pci_fws.json
+# AFTER (regex on selfLink tail, works everywhere)
 gcloud compute firewall-rules list --project "$PROJECT_ID" \
-  --filter="network=$NETWORK AND direction=INGRESS AND disabled=false" --format=json > /tmp/pci_fws.json
+  --filter="(network ~ '(^|/)networks/${NETWORK}$') AND direction=INGRESS AND disabled=false" \
+  --format=json > /tmp/pci_fws.json
+
 check "No 0.0.0.0/0 ingress on $NETWORK [Req 1]" \
   bash -lc '! jq -e '\''.[]?|.sourceRanges[]? | select(.=="0.0.0.0/0")'\'' /tmp/pci_fws.json >/dev/null'
 
