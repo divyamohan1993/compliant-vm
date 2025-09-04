@@ -94,16 +94,19 @@ dedup() { awk '!seen[$0]++'; }
 
 # ---- Req 1: Network security controls ----------------------------------------
 section "Req 1 — Install and maintain network security controls"
-# No 0.0.0.0/0 ingress on the VPC
-# gcloud compute firewall-rules list --project "$PROJECT_ID" \
-#   --filter="network=$NETWORK AND direction=INGRESS AND disabled=false" --format=json > /tmp/pci_fws.json
-# AFTER (regex on selfLink tail, works everywhere)
-gcloud compute firewall-rules list --project "$PROJECT_ID" \
-  --filter="(network ~ '(^|/)networks/${NETWORK}$') AND direction=INGRESS AND disabled=false" \
-  --format=json > /tmp/pci_fws.json
 
+# List all rules; filter locally (portable across gcloud versions)
+gcloud compute firewall-rules list --project "$PROJECT_ID" --format=json > /tmp/pci_fws.json 2>/dev/null || echo "[]" >/tmp/pci_fws.json
+
+# No 0.0.0.0/0 ingress on this VPC
 check "No 0.0.0.0/0 ingress on $NETWORK [Req 1]" \
-  bash -lc '! jq -e '\''.[]?|.sourceRanges[]? | select(.=="0.0.0.0/0")'\'' /tmp/pci_fws.json >/dev/null'
+  bash -lc 'jq -e --arg net "'"$NETWORK"'" '\''[
+      .[] 
+      | select(.network | endswith("/networks/" + $net))
+      | select(.direction == "INGRESS")
+      | select(.disabled != true)
+      | .sourceRanges[]?
+    ] | index("0.0.0.0/0") == null'\'' /tmp/pci_fws.json >/dev/null'
 
 # IAP-only SSH (tcp:22 from 35.235.240.0/20)
 if gcloud compute firewall-rules describe allow-iap-ssh --project "$PROJECT_ID" --format=json >/tmp/pci_fw_iap.json 2>/dev/null; then
