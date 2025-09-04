@@ -280,18 +280,24 @@ ssh_probe() {
 }
 
 
+# ---- Host probes (supports Req 2,7,8,10,11.5/FIM intent) ----
+# ... keep everything above as-is (REMOTE heredoc + ssh_probe function) ...
+
 if ((${#VMS[@]})); then
   for inst in "${VMS[@]}"; do
-    set +e
-
     # Refresh OS Login key TTL if a key was provided (prevents occasional SSH rc=1)
     if [[ -n "$SSH_KEY" && -f "$SSH_KEY.pub" ]]; then
       gcloud compute os-login ssh-keys add --project "$PROJECT_ID" --key-file="$SSH_KEY.pub" --ttl=24h >/dev/null 2>&1 || true
     fi
-    
-    out="$(gcloud compute ssh "$inst" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE" 2>/dev/null)"
-    rc=$?
-    set -e
+
+    tmpout="$(mktemp)"
+    if ssh_probe "$inst" "$REMOTE" >"$tmpout"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    out="$(cat "$tmpout")"; rm -f "$tmpout"
+
     if (( rc != 0 )); then
       log "WARN: SSH probe failed on $inst (marking probe checks as FAIL)"
       fail_list+=("Auditd active on $inst"); fail_list+=("Audit rules present on $inst")
@@ -337,6 +343,7 @@ if ((${#VMS[@]})); then
 else
   log "Skipping host probes (no --vm provided)."
 fi
+
 
 # ---- Scoreboard & evidence file ----------------------------------------------
 section "PCI DSS v4.0.1 L1 Scoreboard"
