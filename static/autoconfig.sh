@@ -207,27 +207,27 @@ remote_put() {
 
 sleep 5
 
-# ---- 2) KMS (CMEK) -------------------------------------------------------------
-section "2) KMS (CMEK) with rotation schedule"
-if ! exists_keyring; then
-  gcloud kms keyrings create "$KEYRING" --location "$KEY_LOC" --project "$PROJECT_ID"
-else
-  log "Keyring $KEYRING exists - skipping"
-fi
+# # ---- 2) KMS (CMEK) -------------------------------------------------------------
+# section "2) KMS (CMEK) with rotation schedule"
+# if ! exists_keyring; then
+#   gcloud kms keyrings create "$KEYRING" --location "$KEY_LOC" --project "$PROJECT_ID"
+# else
+#   log "Keyring $KEYRING exists - skipping"
+# fi
 
-NEXT_ROTATION="$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ || date -u -v+30d +%Y-%m-%dT%H:%M:%SZ)"
-if ! exists_key; then
-  gcloud kms keys create "$KEY" --location "$KEY_LOC" --keyring "$KEYRING" \
-    --purpose=encryption --default-algorithm="google-symmetric-encryption" \
-    --rotation-period="30d" --next-rotation-time="$NEXT_ROTATION" --project "$PROJECT_ID"
-else
-  # ensure rotation is configured (safe update)
-  gcloud kms keys update "$KEY" --location "$KEY_LOC" --keyring "$KEYRING" \
-    --rotation-period="30d" --next-rotation-time="$NEXT_ROTATION" --project "$PROJECT_ID" || true
-  log "Key $KEY exists - rotation ensured"
-fi
+# NEXT_ROTATION="$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ || date -u -v+30d +%Y-%m-%dT%H:%M:%SZ)"
+# if ! exists_key; then
+#   gcloud kms keys create "$KEY" --location "$KEY_LOC" --keyring "$KEYRING" \
+#     --purpose=encryption --default-algorithm="google-symmetric-encryption" \
+#     --rotation-period="30d" --next-rotation-time="$NEXT_ROTATION" --project "$PROJECT_ID"
+# else
+#   # ensure rotation is configured (safe update)
+#   gcloud kms keys update "$KEY" --location "$KEY_LOC" --keyring "$KEYRING" \
+#     --rotation-period="30d" --next-rotation-time="$NEXT_ROTATION" --project "$PROJECT_ID" || true
+#   log "Key $KEY exists - rotation ensured"
+# fi
 
-BOOT_KMS="projects/${PROJECT_ID}/locations/${KEY_LOC}/keyRings/${KEYRING}/cryptoKeys/${KEY}"
+# BOOT_KMS="projects/${PROJECT_ID}/locations/${KEY_LOC}/keyRings/${KEYRING}/cryptoKeys/${KEY}"
 
 # # ---- 3) Service Account + IAM (with eventual-consistency retry) ---------------
 # section "3) Service Account & IAM"

@@ -279,10 +279,6 @@ ssh_probe() {
   return "$rc"
 }
 
-
-# ---- Host probes (supports Req 2,7,8,10,11.5/FIM intent) ----
-# ... keep everything above as-is (REMOTE heredoc + ssh_probe function) ...
-
 if ((${#VMS[@]})); then
   for inst in "${VMS[@]}"; do
     # Refresh OS Login key TTL if a key was provided (prevents occasional SSH rc=1)
