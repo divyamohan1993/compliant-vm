@@ -91,6 +91,24 @@ pass_list=(); fail_list=(); manual_list=(); probe_json=()
 check() { local name="$1"; shift; if "$@"; then log "PASS: $name"; pass_list+=("$name"); else log "FAIL: $name"; fail_list+=("$name"); fi; }
 note()  { manual_list+=("$1"); log "MANUAL: $1"; }
 dedup() { awk '!seen[$0]++'; }
+# ---- gcloud Monitoring compatibility (GA/beta/alpha) --------------------------
+monitoring_list_json() {
+  # Try GA
+  if gcloud monitoring alert-policies list --format=json >/tmp/_mon.json 2>/dev/null; then
+    cat /tmp/_mon.json; return 0
+  fi
+  # Try beta
+  if gcloud beta monitoring alert-policies list --format=json >/tmp/_mon.json 2>/dev/null; then
+    cat /tmp/_mon.json; return 0
+  fi
+  # Alpha uses 'policies'
+  if gcloud alpha monitoring policies list --format=json >/tmp/_mon.json 2>/dev/null; then
+    cat /tmp/_mon.json; return 0
+  fi
+  # Last resort: empty list
+  echo "[]"
+}
+
 
 # ---- Req 1: Network security controls ----------------------------------------
 section "Req 1 — Install and maintain network security controls"
@@ -207,9 +225,14 @@ check "Logging retention >= 365 days [Req 10]" bash -lc 'jq -e ".retentionDays>=
 check "At least 90 days immediate availability [Req 10]" bash -lc 'jq -e ".retentionDays>=90" /tmp/pci_logbucket.json >/dev/null'
 
 # Monitoring alert policies exist (operational signal)
-gcloud monitoring alert-policies list --format=json > /tmp/pci_alerts.json || true
+monitoring_list_json > /tmp/pci_alerts.json || true
 check "At least 1 Monitoring alert policy exists [Req 10/11/12 evidence]" \
   bash -lc 'jq -e "length>=1" /tmp/pci_alerts.json >/dev/null' || true
+
+# # Monitoring alert policies exist (operational signal)
+# gcloud monitoring alert-policies list --format=json > /tmp/pci_alerts.json || true
+# check "At least 1 Monitoring alert policy exists [Req 10/11/12 evidence]" \
+#   bash -lc 'jq -e "length>=1" /tmp/pci_alerts.json >/dev/null' || true
 
 # ---- Req 11: Regular testing ---------------------------------------------------
 section "Req 11 — Regularly test security of systems and networks"
@@ -239,13 +262,42 @@ ntp="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo no)"; ech
 tmout="$(grep -RhsE '^\s*TMOUT=([3-9][0-9]{2,}|[1-9][0-9]{3,})' /etc/profile /etc/profile.d/* 2>/dev/null | wc -l)"; echo "TMOUT_SET=$tmout"
 EOS
 
+# Run SSH command and always return a numeric RC without tripping ERR
+ssh_probe() {
+  local host="$1" cmd="$2" tmp rc
+  tmp="$(mktemp)"
+  (
+    set +e
+    trap - ERR
+    gcloud compute ssh "$host" --zone "$ZONE" --project "$PROJECT_ID" \
+      "${SSH_COMMON[@]}" --command "$cmd" >"$tmp" 2>/dev/null
+    echo $? >"$tmp.rc"
+  )
+  rc="$(cat "$tmp.rc" 2>/dev/null || echo 1)"
+  cat "$tmp"
+  rm -f "$tmp" "$tmp.rc"
+  return "$rc"
+}
+
+
+# if ((${#VMS[@]})); then
+#   for inst in "${VMS[@]}"; do
+#     set +e
+#     out="$(gcloud compute ssh "$inst" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE" 2>/dev/null)"
+#     rc=$?
+#     set -e
+#     if (( rc != 0 )); then
+#       log "WARN: SSH probe failed on $inst (marking probe checks as FAIL)"
+#       fail_list+=("Auditd active on $inst"); fail_list+=("Audit rules present on $inst")
+#       fail_list+=("Ops Agent running on $inst"); fail_list+=("SSH password auth disabled on $inst")
+#       fail_list+=("SSH root login disabled on $inst"); fail_list+=("AIDE installed on $inst")
+#       fail_list+=("AIDE baseline present on $inst"); fail_list+=("Unattended upgrades enabled on $inst")
+#       fail_list+=("NTP sync enabled on $inst");   fail_list+=("Auto logoff (TMOUT) set on $inst")
+#       continue
+#     fi
 if ((${#VMS[@]})); then
   for inst in "${VMS[@]}"; do
-    set +e
-    out="$(gcloud compute ssh "$inst" --zone "$ZONE" --project "$PROJECT_ID" "${SSH_COMMON[@]}" --command "$REMOTE" 2>/dev/null)"
-    rc=$?
-    set -e
-    if (( rc != 0 )); then
+    if ! out="$(ssh_probe "$inst" "$REMOTE")"; then
       log "WARN: SSH probe failed on $inst (marking probe checks as FAIL)"
       fail_list+=("Auditd active on $inst"); fail_list+=("Audit rules present on $inst")
       fail_list+=("Ops Agent running on $inst"); fail_list+=("SSH password auth disabled on $inst")
@@ -254,7 +306,7 @@ if ((${#VMS[@]})); then
       fail_list+=("NTP sync enabled on $inst");   fail_list+=("Auto logoff (TMOUT) set on $inst")
       continue
     fi
-
+    
     echo "$out" | sed 's/^/  ['"$inst"'] /'
     auditd="$(grep '^AUDITD=' <<<"$out" | cut -d= -f2-)"
     rules="$(grep '^AUDIT_RULES=' <<<"$out" | cut -d= -f2-)"
