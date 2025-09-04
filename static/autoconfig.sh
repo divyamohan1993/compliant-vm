@@ -6,6 +6,8 @@
 set -Eeuo pipefail
 shopt -s inherit_errexit
 
+clear
+
 # ---- Logging / diagnostics ----------------------------------------------------
 export PS4='+ [${EPOCHREALTIME}] [${BASH_SOURCE##*/}:${LINENO}] '
 exec 3>&1
